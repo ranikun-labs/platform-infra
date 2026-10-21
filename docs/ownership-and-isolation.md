@@ -123,7 +123,7 @@ State Backend 제공자·암호화·Lock 구성·OIDC/AssumeRole 설정·Secret 
 - GitHub 자체 Workflow 외에 **Webhook, 외부 CI/CD, 클라우드 배포 서비스 연결**까지 확인해야 합니다.
 - GitHub Free Organization의 Private 저장소는 강제 Branch Rules 사용에 제약이 있을 수 있습니다. 사람의 수동 검증 절차와 GitHub의 기술적 강제 보호 기능을 동일하게 취급하지 않습니다.
 - Rollback은 이미지 태그만 돌리는 작업이 아닙니다. **호환되는 이미지 Digest·설정·자격증명·DB 스키마 상태**를 함께 점검해야 합니다.
-- 향후 SQS를 도입하면 dev/prod Queue·DLQ·IAM을 분리합니다. 이 문서는 SQS 생성 승인이 아닙니다.
+- **메시징 목표 정책:** ADR-0023/DEC-072에 따라 AWS SQS는 V1 서비스 간 비동기 메시징의 승인된 목표 Provider입니다. 다만 이 결정은 실제 Queue·DLQ·Worker·IAM 생성이나 서비스 연동이 완료됐다는 뜻이 아닙니다. 구현할 때 dev/prod Queue·DLQ·IAM을 분리하며, 리소스 생성·비용·배포는 별도 승인 Gate를 거칩니다.
 
 ## 8. Git 저장소 구조
 
@@ -178,6 +178,7 @@ platform-infra/
 ## 11. 근거 자료
 
 - [ADR-0022 — AWS V1 MVP Primary Runtime](https://github.com/ranikun-labs/harness-foundation-docs/blob/main/docs/adr/ADR-0022-aws-v1-mvp-primary-runtime.md)
+- [ADR-0023 — SQS 메시징·환경 격리 정책](https://github.com/ranikun-labs/harness-foundation-docs/blob/main/docs/adr/ADR-0023-sqs-messaging-and-environment-isolation.md)
 - [ADR-0020 — PostgreSQL Schema Ownership](https://github.com/ranikun-labs/harness-foundation-docs/blob/main/docs/adr/ADR-0020-shared-platform-postgresql-schema-ownership.md)
 - [AWS V1 MVP Deployment Plan](https://github.com/ranikun-labs/harness-foundation-docs/blob/main/docs/architecture/backend-service-foundation/aws-v1-mvp-deployment-plan.md)
 - [Infra Issue #1 — 작업·검수 이력](https://github.com/ranikun-labs/platform-infra/issues/1)
