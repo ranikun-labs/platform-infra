@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | 인프라 저장소 | Private 저장소의 C0 설계 문서 존재 | 공유/서비스별 IaC 정의 |
 | CI/CD 독립성 | 실제 Pipeline·IAM 격리 검증 전 | 제품별 독립 실행과 배포 |
-| AWS EC2 / RDS | 이 문서로 구축한 자원 없음. 실제 인프라 존재 여부는 별도 점검 필요 | AWS 서울 리전의 서비스별 EC2 + 공통 RDS |
+| AWS 배치 / RDS | 이 문서로 구축한 자원 없음. 실제 인프라 존재 여부는 별도 점검 필요 | 아래 §5의 역사적 EC2 그림과 현행 AWS/ECS 방향을 구분. 현재 배치 채택·구축 승인은 별도 |
 | DB 소유권 | ADR-0020의 정책 승인. 제품별 운영 이전은 별도 작업 | 서비스별 Schema·Role·Migration 분리 |
 | oh-my-ai | 로컬 CLI·Skill 중심 | 클라우드 없이 로컬 V1 동작 |
 | Production 배포 | 이 계약에 포함하지 않음 | 별도 Owner 승인과 운영 검증 |
@@ -61,9 +61,9 @@
 - Carelog·Finance 서버나 AWS 공통 플랫폼 장애가 있어도 핵심 로컬 작업 흐름은 완료할 수 있어야 합니다.
 - 향후 별도 Cloud Control Plane이 승인되기 전까지 AWS 배포 대상으로 강제로 편입하지 않습니다.
 
-## 5. 초기 AWS 목표와 공통 장애 위험
+## 5. 역사적 AWS 목표 기록과 공통 장애 위험
 
-[ADR-0022](https://github.com/ranikun-labs/harness-foundation-docs/blob/main/docs/adr/ADR-0022-aws-v1-mvp-primary-runtime.md)는 다음 **목표 배치**를 정합니다.
+다음 표는 2026-10-12 [ADR-0022](https://github.com/ranikun-labs/harness-foundation-docs/blob/cfc3ac80be777b2783bd60c249f745f77d7cb8b8/docs/adr/ADR-0022-aws-v1-mvp-primary-runtime.md)의 **역사적 목표 배치**입니다. ADR-0022는 `in_review` 및 `owner_policy_direction_only` 상태로, 공식 문서 최종 승인·발효는 확인되지 않았습니다. [RPL-125](https://ranikunlabs.atlassian.net/browse/RPL-125)의 2026-11-06 보충에 따라 현행 AWS/ECS 방향을 재사용하며 기존 Architecture Source Owner가 문구를 정합화합니다. 이 C0 문서는 4 EC2 신규 채택·ECS/Aurora 수치·전환 방식·구축을 승인하지 않습니다.
 
 | 실행 단위 | 목표 배치 | 운영 의미 |
 | --- | --- | --- |

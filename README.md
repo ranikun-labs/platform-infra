@@ -47,9 +47,9 @@ Ranikun Labs에는 여러 제품이 있습니다.
 
 코드 변경에 필요한 Dockerfile이나 개발용 Compose를 모두 이 저장소로 옮기지 않습니다.
 
-## 4. 목표 구성 — 아직 구현되지 않음
+## 4. 기존 배치 그림 — 역사적 목표 기록, 현재 채택·구축 승인 아님
 
-기존 [ADR-0022](https://github.com/ranikun-labs/harness-foundation-docs/blob/main/docs/adr/ADR-0022-aws-v1-mvp-primary-runtime.md)의 AWS V1 목표:
+아래 그림은 2026-10-12 [ADR-0022](https://github.com/ranikun-labs/harness-foundation-docs/blob/cfc3ac80be777b2783bd60c249f745f77d7cb8b8/docs/adr/ADR-0022-aws-v1-mvp-primary-runtime.md)의 4 EC2 목표 기록입니다. 이 ADR은 `document_status: in_review`, `decision_status_scope: owner_policy_direction_only`이며 공식 문서 최종 승인·발효는 확인되지 않았습니다. 현행 AWS/ECS 방향과의 문구 정합화는 [RPL-125](https://ranikunlabs.atlassian.net/browse/RPL-125) 및 기존 Architecture Source Owner가 담당합니다. 이 C0 문서는 배치 방향을 다시 선택하거나 ECS/Aurora 수치·전환 방식을 결정하지 않습니다.
 
 ```text
 AWS 서울 리전 (ap-northeast-2)
@@ -65,7 +65,7 @@ AWS 서울 리전 (ap-northeast-2)
      └─ audit 스키마 (향후 승인 범위)
 ```
 
-위 그림은 **목표 아키텍처이지 실제 EC2/RDS 생성 증거가 아닙니다.** EC2 사양·RDS 버전·복구·비용·보안 설정도 구현 전에 확인해야 합니다.
+위 그림은 **역사적 목표 기록이며 현재 배치 채택·실제 EC2/RDS 생성·구축 승인 증거가 아닙니다.** 사양·DB 버전·복구·비용·보안 설정은 기존 승인 Gate와 후속 정합화·검증을 따릅니다.
 
 ## 5. 앞으로 이 저장소에 들어갈 구성
 
