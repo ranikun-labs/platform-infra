@@ -37,3 +37,9 @@ jobs:
         run: terraform validate -no-color
       - name: Run mocked contract tests
         run: terraform test -no-color
+      - name: Test release IAM policy boundaries
+        if: matrix.root == 'release/platform'
+        working-directory: modules/dev-release
+        run: |
+          terraform init -backend=false -input=false -lockfile=readonly
+          terraform test -no-color

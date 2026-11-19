@@ -1,6 +1,9 @@
 terraform {
   required_providers {
-    aws = { source = "hashicorp/aws" }
+    aws = {
+      source  = "hashicorp/aws"
+      version = "6.24.0"
+    }
   }
 }
 
@@ -63,7 +66,7 @@ resource "aws_iam_role_policy" "publisher" {
 }
 data "aws_iam_policy_document" "deployer" {
   statement {
-    actions   = ["ecs:DescribeServices", "ecs:UpdateService"]
+    actions   = ["ecs:DescribeServices"]
     resources = [local.service_arn]
     condition {
       test     = "ArnEquals"
@@ -72,13 +75,27 @@ data "aws_iam_policy_document" "deployer" {
     }
   }
   statement {
-    actions   = ["ecs:DescribeTaskDefinition"]
-    resources = [local.task_definition_arn]
+    actions   = ["ecs:UpdateService"]
+    resources = [local.service_arn]
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [local.cluster_arn]
+    }
+    condition {
+      test     = "ArnLike"
+      variable = "ecs:task-definition"
+      values   = [local.task_definition_arn]
+    }
   }
-  # ECS RegisterTaskDefinition does not support resource-level permissions.
+  # DescribeTaskDefinition does not support resource-level permissions.
+  statement {
+    actions   = ["ecs:DescribeTaskDefinition"]
+    resources = ["*"]
+  }
   statement {
     actions   = ["ecs:RegisterTaskDefinition"]
-    resources = ["*"]
+    resources = [local.task_definition_arn]
   }
   statement {
     actions = ["iam:PassRole"]

@@ -44,7 +44,7 @@ jobs:
         with:
           ref: ${{ inputs.test_sha }}
           persist-credentials: false
-      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+      - uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
         with:
           role-to-assume: ${{ vars.DEV_PUBLISHER_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -85,7 +85,7 @@ jobs:
       cancel-in-progress: false
     environment: dev-${{ inputs.service }}-deploy
     steps:
-      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+      - uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
         with:
           role-to-assume: ${{ vars.DEV_DEPLOYER_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -95,6 +95,7 @@ jobs:
           ACCOUNT: ${{ vars.DEV_AWS_ACCOUNT_ID }}
           REGION: ${{ vars.AWS_REGION }}
           REPOSITORY: ${{ vars.DEV_ECR_REPOSITORY }}
+          WORKLOAD: ${{ inputs.service }}
           CLUSTER: ${{ vars.DEV_ECS_CLUSTER }}
           SERVICE: ${{ vars.DEV_ECS_SERVICE }}
           CONTAINER: ${{ vars.DEV_ECS_CONTAINER }}
@@ -123,6 +124,18 @@ jobs:
             ([.taskDefinition.containerDefinitions[] | select(.name == $container)] | length == 1) and
             ([.taskDefinition.containerDefinitions[] | select(.name == $container) | .image | split("@")[0] | split(":")[0]] == [$repository])
           ' <<<"$task" >/dev/null
+          # Database migrations must run separately; rolling back an image cannot reverse DDL.
+          if [[ "$WORKLOAD" != gateway ]]; then
+            if ! jq -e --arg container "$CONTAINER" '
+              [.taskDefinition.containerDefinitions[] | select(.name == $container) |
+               (([.environment[]? | select(.name == "SPRING_FLYWAY_ENABLED" and .value == "false")] | length) == 1 and
+                ([.environment[]? | select(.name == "SPRING_FLYWAY_ENABLED")] | length) == 1 and
+                ([.secrets[]? | select(.name == "SPRING_FLYWAY_ENABLED")] | length) == 0)] == [true]
+            ' <<<"$task" >/dev/null; then
+              echo "Deploy blocked: active container must explicitly set SPRING_FLYWAY_ENABLED=false without a secret of the same name" >&2
+              exit 1
+            fi
+          fi
           # Explicit RegisterTaskDefinition fields; server-generated metadata is never submitted.
           jq --arg container "$CONTAINER" --arg image "$IMAGE" '
             .taskDefinition | {family, taskRoleArn, executionRoleArn, networkMode, containerDefinitions,
