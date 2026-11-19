@@ -1,0 +1,213 @@
+name: Release development ECS service
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+      dockerfile:
+        required: true
+        type: string
+      context:
+        default: .
+        type: string
+      deploy_enabled:
+        required: true
+        type: boolean
+      test_sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: dev-${{ inputs.service }}-publish
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    steps:
+      - name: Validate release inputs
+        env:
+          SERVICE: ${{ inputs.service }}
+          TEST_SHA: ${{ inputs.test_sha }}
+          CALLER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SERVICE" =~ ^(gateway|core|carelog|finance)$ ]]
+          [[ "$TEST_SHA" =~ ^[0-9a-f]{40}$ && "$TEST_SHA" == "$CALLER_SHA" ]]
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.test_sha }}
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.DEV_PUBLISHER_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.DEV_AWS_ACCOUNT_ID }}
+      - name: Build and publish immutable image
+        id: publish
+        env:
+          ACCOUNT: ${{ vars.DEV_AWS_ACCOUNT_ID }}
+          REGION: ${{ vars.AWS_REGION }}
+          REPOSITORY: ${{ vars.DEV_ECR_REPOSITORY }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          CONTEXT: ${{ inputs.context }}
+          TEST_SHA: ${{ inputs.test_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$ACCOUNT" =~ ^[0-9]{12}$ && "$REPOSITORY" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]]
+          registry="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
+          tag="${TEST_SHA}-${RUN_ID}-${RUN_ATTEMPT}"
+          aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$registry"
+          docker build --file "$DOCKERFILE" --tag "$registry/$REPOSITORY:$tag" "$CONTEXT"
+          docker push "$registry/$REPOSITORY:$tag"
+          digest=$(aws ecr describe-images --repository-name "$REPOSITORY" --image-ids "imageTag=$tag" --query 'imageDetails[0].imageDigest' --output text)
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "image=$registry/$REPOSITORY@$digest" >> "$GITHUB_OUTPUT"
+          # Scan-on-push is optional during bootstrap. Report status when available.
+          scan=$(aws ecr describe-image-scan-findings --repository-name "$REPOSITORY" --image-id "imageDigest=$digest" --query 'imageScanStatus.status' --output text 2>/dev/null || true)
+          echo "ECR scan status: ${scan:-not available}"
+
+  deploy:
+    if: ${{ inputs.deploy_enabled }}
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    concurrency:
+      group: dev-ecs-${{ inputs.service }}
+      cancel-in-progress: false
+    environment: dev-${{ inputs.service }}-deploy
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.DEV_DEPLOYER_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.DEV_AWS_ACCOUNT_ID }}
+      - name: Register and deploy image
+        env:
+          ACCOUNT: ${{ vars.DEV_AWS_ACCOUNT_ID }}
+          REGION: ${{ vars.AWS_REGION }}
+          REPOSITORY: ${{ vars.DEV_ECR_REPOSITORY }}
+          CLUSTER: ${{ vars.DEV_ECS_CLUSTER }}
+          SERVICE: ${{ vars.DEV_ECS_SERVICE }}
+          CONTAINER: ${{ vars.DEV_ECS_CONTAINER }}
+          FAMILY: ${{ vars.DEV_ECS_TASK_FAMILY }}
+          IMAGE: ${{ needs.publish.outputs.image }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$ACCOUNT" =~ ^[0-9]{12}$ && -n "$CLUSTER" && -n "$SERVICE" && -n "$CONTAINER" && -n "$FAMILY" && -n "$REPOSITORY" ]]
+          [[ "$IMAGE" == "${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${REPOSITORY}@sha256:"* && "${IMAGE##*@sha256:}" =~ ^[a-f0-9]{64}$ ]]
+          describe_service() {
+            aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --output json
+          }
+          initial=$(describe_service)
+          jq -e --arg account "$ACCOUNT" --arg region "$REGION" '
+            (.failures | length == 0) and (.services | length == 1) and
+            (.services[0] | .status == "ACTIVE" and .desiredCount > 0 and
+             (.serviceArn | startswith("arn:aws:ecs:" + $region + ":" + $account + ":service/")) and
+             (.deployments | length == 1) and (.deployments[0].status == "PRIMARY") and
+             (.deployments[0].rolloutState == "COMPLETED") and .runningCount == .desiredCount and .pendingCount == 0)
+          ' <<<"$initial" >/dev/null
+          previous=$(jq -r '.services[0].taskDefinition' <<<"$initial")
+          desired=$(jq -r '.services[0].desiredCount' <<<"$initial")
+          task=$(aws ecs describe-task-definition --task-definition "$previous" --output json)
+          jq -e --arg family "$FAMILY" --arg container "$CONTAINER" --arg repository "${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${REPOSITORY}" '
+            .taskDefinition.family == $family and
+            ([.taskDefinition.containerDefinitions[] | select(.name == $container)] | length == 1) and
+            ([.taskDefinition.containerDefinitions[] | select(.name == $container) | .image | split("@")[0] | split(":")[0]] == [$repository])
+          ' <<<"$task" >/dev/null
+          # Explicit RegisterTaskDefinition fields; server-generated metadata is never submitted.
+          jq --arg container "$CONTAINER" --arg image "$IMAGE" '
+            .taskDefinition | {family, taskRoleArn, executionRoleArn, networkMode, containerDefinitions,
+              volumes, placementConstraints, requiresCompatibilities, cpu, memory, pidMode, ipcMode,
+              proxyConfiguration, inferenceAccelerators, ephemeralStorage, runtimePlatform, enableFaultInjection} |
+            with_entries(select(.value != null)) |
+            .containerDefinitions |= map(if .name == $container then .image = $image else . end)
+          ' <<<"$task" > "$RUNNER_TEMP/task-definition.json"
+          candidate=$(aws ecs register-task-definition --cli-input-json "file://$RUNNER_TEMP/task-definition.json" --query 'taskDefinition.taskDefinitionArn' --output text)
+          [[ "$candidate" == "arn:aws:ecs:${REGION}:${ACCOUNT}:task-definition/${FAMILY}:"* ]]
+          # Recheck just before update to avoid overwriting a release that started meanwhile.
+          current=$(describe_service)
+          jq -e --arg previous "$previous" --argjson desired "$desired" '
+            (.failures | length == 0) and (.services | length == 1) and
+            (.services[0] | .taskDefinition == $previous and .desiredCount == $desired and
+             (.deployments | length == 1) and .deployments[0].rolloutState == "COMPLETED")
+          ' <<<"$current" >/dev/null
+          attempted=false
+          rollback() {
+            code=$?
+            trap - ERR
+            if [[ "$attempted" == true ]]; then
+              state=$(describe_service || true)
+              if jq -e --arg candidate "$candidate" --argjson desired "$desired" '
+                (.services | length == 1) and (.services[0] | .taskDefinition == $candidate and
+                 .desiredCount == $desired and any(.deployments[]; .status == "PRIMARY" and .taskDefinition == $candidate))
+              ' <<<"$state" >/dev/null 2>&1; then
+                echo "Release failed; restoring previous task definition $previous" >&2
+                if aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --task-definition "$previous" >/dev/null; then
+                  restored=false
+                  for ((j=0; j<60; j++)); do
+                    state=$(describe_service || true)
+                    if jq -e --arg previous "$previous" --argjson desired "$desired" '
+                      (.failures | length == 0) and (.services | length == 1) and
+                      (.services[0] | .taskDefinition == $previous and .desiredCount == $desired and
+                       (.deployments | length == 1) and .deployments[0].status == "PRIMARY" and
+                       .deployments[0].taskDefinition == $previous and .deployments[0].rolloutState == "COMPLETED" and
+                       .runningCount == $desired and .pendingCount == 0)
+                    ' <<<"$state" >/dev/null 2>&1; then
+                      restored=true
+                      echo "Rollback stabilized on $previous" >&2
+                      break
+                    fi
+                    sleep 10
+                  done
+                  [[ "$restored" == true ]] || echo "Rollback requested but did not stabilize within 10 minutes" >&2
+                else
+                  echo "Rollback request failed" >&2
+                fi
+              else
+                echo "Release failed; service changed externally, so rollback was skipped" >&2
+              fi
+            fi
+            exit "$code"
+          }
+          trap rollback ERR
+          attempted=true
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --task-definition "$candidate" >/dev/null
+          for ((i=0; i<120; i++)); do
+            state=$(describe_service)
+            # ECS reads can briefly show the old revision after an accepted update.
+            # Wait up to one minute only while the original stable deployment remains visible.
+            if (( i < 6 )) && jq -e --arg previous "$previous" --argjson desired "$desired" '
+              (.failures | length == 0) and (.services | length == 1) and
+              (.services[0] | .taskDefinition == $previous and .desiredCount == $desired and
+               (.deployments | length == 1) and .deployments[0].status == "PRIMARY" and
+               .deployments[0].taskDefinition == $previous and .deployments[0].rolloutState == "COMPLETED")
+            ' <<<"$state" >/dev/null; then
+              sleep 10
+              continue
+            fi
+            jq -e --arg candidate "$candidate" --argjson desired "$desired" '
+              (.failures | length == 0) and (.services | length == 1) and
+              (.services[0] | .taskDefinition == $candidate and .desiredCount == $desired and
+               any(.deployments[]; .status == "PRIMARY" and .taskDefinition == $candidate and .rolloutState != "FAILED"))
+            ' <<<"$state" >/dev/null
+            if jq -e --arg candidate "$candidate" --argjson desired "$desired" '
+              .services[0] | (.deployments | length == 1) and
+              .deployments[0].status == "PRIMARY" and .deployments[0].taskDefinition == $candidate and
+              .deployments[0].rolloutState == "COMPLETED" and .runningCount == $desired and .pendingCount == 0
+            ' <<<"$state" >/dev/null; then
+              echo "Deployment completed: $candidate"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Deployment timed out" >&2
+          false

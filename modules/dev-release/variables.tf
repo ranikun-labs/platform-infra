@@ -1,0 +1,8 @@
+variable "aws_account_id" { type = string }
+variable "aws_region" { type = string }
+variable "github_repository" { type = string }
+variable "github_oidc_provider_arn" { type = string }
+variable "cluster_name" { type = string }
+variable "service_name" { type = string }
+variable "tags" { type = map(string) }
+variable "workload" { type = string }
