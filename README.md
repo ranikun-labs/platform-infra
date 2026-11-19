@@ -5,6 +5,8 @@
 **현재 단계: C0 — 인프라 설계 문서 정리. 실제 클라우드 환경은 만들지 않았습니다.**  
 **작업 추적:** [Infra Issue #1](https://github.com/ranikun-labs/platform-infra/issues/1)
 
+[DEV ECS Terraform 실행 후보와 검증 순서](docs/dev-ecs-runbook.md)에 공용 기반, SCG와 Platform Core, Carelog·Finance의 개별 루트를 정리했습니다. 실제 AWS 상태와 적용 여부는 실행 증거를 기준으로 확인합니다.
+
 ## 1. 왜 이 저장소가 필요한가?
 
 Ranikun Labs에는 여러 제품이 있습니다.

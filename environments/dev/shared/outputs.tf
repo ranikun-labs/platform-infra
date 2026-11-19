@@ -1,0 +1,12 @@
+output "vpc_id" { value = aws_vpc.shared.id }
+output "public_subnet_ids" { value = aws_subnet.public[*].id }
+output "private_subnet_ids" { value = aws_subnet.private[*].id }
+output "cluster_arn" { value = aws_ecs_cluster.shared.arn }
+output "namespace_id" { value = aws_service_discovery_private_dns_namespace.shared.id }
+output "namespace_name" { value = aws_service_discovery_private_dns_namespace.shared.name }
+output "database_security_group_id" { value = aws_security_group.database.id }
+output "valkey_security_group_id" { value = aws_security_group.valkey.id }
+output "database_endpoint" { value = aws_rds_cluster.database.endpoint }
+output "database_reader_endpoint" { value = aws_rds_cluster.database.reader_endpoint }
+output "database_master_secret_arn" { value = aws_rds_cluster.database.master_user_secret[0].secret_arn }
+output "valkey_endpoint" { value = var.enable_valkey ? aws_elasticache_replication_group.valkey[0].primary_endpoint_address : null }
