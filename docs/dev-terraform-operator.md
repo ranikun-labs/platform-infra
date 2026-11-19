@@ -10,7 +10,11 @@ export DEV_AWS_ROLE_NAME=approved-dev-role
 export DEV_STATE_BUCKET=approved-dev-state-bucket
 export DEV_STATE_REGION=ap-northeast-2
 scripts/dev-terraform plan carelog /private/path/carelog.tfplan
-# Privately inspect: terraform -chdir=environments/dev/carelog show /private/path/carelog.tfplan
+# Initialize a private temporary data directory for inspection; no backend or AWS credentials.
+inspect_dir=$(mktemp -d)
+TF_DATA_DIR="$inspect_dir" terraform -chdir=environments/dev/carelog init -backend=false -input=false -lockfile=readonly
+TF_DATA_DIR="$inspect_dir" terraform -chdir=environments/dev/carelog show /private/path/carelog.tfplan
+rm -rf -- "$inspect_dir"
 # Obtain explicit approval of the exact plan and its printed SHA-256.
 scripts/dev-terraform apply carelog /private/path/carelog.tfplan REVIEWED_64_CHARACTER_SHA256
 ```

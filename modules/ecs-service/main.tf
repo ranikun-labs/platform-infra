@@ -92,6 +92,8 @@ resource "aws_ecs_task_definition" "baseline" {
   memory                   = tostring(var.memory)
   execution_role_arn       = aws_iam_role.execution.arn
   task_role_arn            = aws_iam_role.app.arn
+  skip_destroy             = true
+  lifecycle { create_before_destroy = true }
   container_definitions = jsonencode([{
     name             = var.name
     image            = var.image

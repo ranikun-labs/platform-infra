@@ -25,6 +25,11 @@ for name in ${!TF_CLI_ARGS@}; do unset "$name"; done
 export TF_IN_AUTOMATION=1 TF_INPUT=0 TF_WORKSPACE=default TF_VAR_aws_account_id="$DEV_AWS_ACCOUNT_ID"
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 root_dir="$repo/environments/dev/$root"
+# Resolve the parent directory before any AWS or backend operation.
+[[ $(basename -- "$plan_file") == *.tfplan ]] || { echo 'Plan filename must end in .tfplan' >&2; exit 2; }
+plan_dir=$(cd -- "$(dirname -- "$plan_file")" && pwd -P) || { echo 'Plan directory must exist' >&2; exit 2; }
+case "$plan_dir/" in "$repo/"*) echo 'Plan must be outside the repository' >&2; exit 2 ;; esac
+plan_file="$plan_dir/$(basename -- "$plan_file")"
 [[ -f $root_dir/versions.tf ]] || { echo 'DEV root is missing' >&2; exit 2; }
 command -v aws >/dev/null && command -v terraform >/dev/null && command -v sha256sum >/dev/null || { echo 'aws, terraform and sha256sum are required' >&2; exit 2; }
 identity=$(aws sts get-caller-identity --query '[Account,Arn]' --output text --no-cli-pager)
@@ -39,9 +44,7 @@ terraform -chdir="$root_dir" init -input=false -reconfigure -lockfile=readonly \
   -backend-config="allowed_account_ids=[\"$DEV_AWS_ACCOUNT_ID\"]"
 if [[ $operation == plan ]]; then
   [[ ! -e $plan_file && ! -L $plan_file && ! -e ${plan_file}.dev-context && ! -L ${plan_file}.dev-context ]] || { echo 'Plan file already exists' >&2; exit 1; }
-  # Resolve before -chdir so relative paths refer to the operator's directory.
-  plan_dir=$(cd -- "$(dirname -- "$plan_file")" && pwd -P)
-  plan_path="$plan_dir/$(basename -- "$plan_file")"
+  plan_path="$plan_file"
   terraform -chdir="$root_dir" plan -input=false -var="aws_account_id=$DEV_AWS_ACCOUNT_ID" -out="$plan_path"
   chmod 600 -- "$plan_path"
   digest=$(sha256sum -- "$plan_path")

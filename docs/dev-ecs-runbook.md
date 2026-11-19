@@ -15,12 +15,31 @@ DEV state는 `dev/{shared,platform,carelog,finance}/terraform.tfstate` 키와 �
 ## DEV 최초 기동 순서
 
 1. DEV 계정과 리전, 기존 리소스, S3 state, DNS/ACM, ECR digest, 외부 OAuth 및 HTTPS egress, Aurora 호환 버전, DB schema/role, 승인된 앱 시크릿과 비용 한도를 먼저 확인한다. 이미 관리 중인 자원은 소유 상태를 확인하고 필요하면 별도 import plan을 준비한다.
-2. `shared`를 빈 데이터 유입 규칙으로 적용한다. 공개 웹 흐름을 열기 전 PostgreSQL 호환 및 DB 백업·복구를 검증한다. Valkey 후보는 기본 비활성이고 기존 인증에 맞는 TLS 연결·상태 보존 방식을 확인해야 한다. NAT 후보는 단일 AZ DEV 구성이다.
+2. `shared`를 빈 데이터 유입 규칙으로 적용한다. 공개 웹 흐름을 열기 전 PostgreSQL 호환 및 DB 백업·복구를 검증한다. Valkey 후보는 기본 비활성이다. 현재 Core의 Identity Redis 빈은 TLS 설정이 없는 Lettuce 연결을 만든다. 정확한 Core·SCG 릴리스에서 TLS와 OAuth 상태·토큰 차단 동작을 검증한 뒤 이 관리형 Valkey를 선택한다. 그전에는 동일 계약을 충족하는 별도 검증된 private 캐시가 필요하다. NAT 후보는 단일 AZ DEV 구성이다.
 3. `platform`과 제품 두 루트는 처음에 0 Task로 초기화한다. Platform과 제품 간 SG ID를 먼저 맞추고 Carelog/Finance를 병렬로 준비한다. Cloud Map 이름과 앱 URI·포트를 동일한 계약으로 설정한다.
 4. `shared`에서 승인된 워크로드 SG만 DB/Valkey에 허용한다. 제품 마이그레이션 담당자가 승인된 단일 실행 경로를 사용해 DB 역할·스키마를 검증한다. DB 관리자 Secret ARN은 관리 경로 전용이다.
 5. 지정된 DEV 서비스에서 한 태스크씩 시작하고 Cloud Map·ALB readiness 뒤 실제 OAuth·제품 API를 확인한다. Carelog 고객/후속 일정과 Finance 저널의 저장·목록·상세·재조회까지 각각 검증한다. Finance의 실계정 경로에는 승인된 SCG 전용 라우팅·Identity 계약이 필요하다. 로컬 synthetic reference auth를 공개 DEV 인증에 사용하지 않는다.
 
-GitHub의 기본 검사 workflow는 backend 없이 검사한다. 실제 plan/apply는 계정과 루트가 확인된 별도 환경에서 단일 루트의 검토 대상 커밋과 실행 역할로 진행한다. 저장한 plan을 비공개로 취급하고, 승인받은 동일 plan만 적용한다. Merge는 apply를 시작하지 않는다. IaC는 설정 변경으로 생긴 baseline task definition을 등록한다. 실행 중인 revision과 desired count의 변경은 해당 서비스의 릴리스·스케일 제어 절차가 맡는다. 구성 변경으로 baseline revision이 바뀌면 릴리스 절차에서 그 revision을 검토 후 활성화한다.
+GitHub의 기본 검사 workflow는 backend 없이 검사한다. 실제 plan/apply는 계정과 루트가 확인된 별도 환경에서 단일 루트의 검토 대상 커밋과 실행 역할로 진행한다. 저장한 plan을 비공개로 취급하고, 승인받은 동일 plan만 적용한다. Merge는 apply를 시작하지 않는다. IaC는 설정 변경으로 생긴 baseline task definition을 등록한다. 실행 중인 revision과 desired count의 변경은 해당 서비스의 릴리스·스케일 제어 절차가 맡는다. 구성 변경으로 baseline revision이 바뀌면 릴리스 절차에서 그 revision을 검토 후 활성화한다. 이전 revision은 서비스가 참조하지 않고 롤백 보존 기간이 지난 뒤 릴리스 책임자가 정리한다.
+
+## 수동 0→1 검증
+
+승인된 DEV 역할·리전으로 진행한다. `aws sts get-caller-identity`에서 실행 역할을 확인하고, `shared`의 `cluster_arn`과 각 루트의 서비스 출력, 승인된 활성 revision ARN을 사용한다. 동일 서비스에서 다른 릴리스·스케일러·운영자가 동시에 desired count를 갱신하는지 먼저 확인한다. 아래 조회와 갱신 사이에 AWS가 조건부 업데이트를 보장하지 않으므로 단일 운영자 조건에서만 실행한다.
+
+```bash
+# DEV_CLUSTER_ARN, DEV_SERVICE_NAME, DEV_AWS_REGION을 검토한 값으로 설정한다.
+aws ecs describe-services --region "$DEV_AWS_REGION" \
+  --cluster "$DEV_CLUSTER_ARN" --services "$DEV_SERVICE_NAME" \
+  --query 'services[0].{status:status,count:desiredCount,running:runningCount,pending:pendingCount,revision:taskDefinition}'
+
+# ACTIVE 서비스, desired/running/pending 0, 승인된 revision을 확인한 경우만 실행한다.
+aws ecs update-service --region "$DEV_AWS_REGION" \
+  --cluster "$DEV_CLUSTER_ARN" --service "$DEV_SERVICE_NAME" --desired-count 1
+aws ecs wait services-stable --region "$DEV_AWS_REGION" \
+  --cluster "$DEV_CLUSTER_ARN" --services "$DEV_SERVICE_NAME"
+```
+
+Core와 선택한 제품의 내부 상태·DB 접근부터 확인하고, SCG는 Platform의 `gateway_target_group_arn`으로 `aws elbv2 describe-target-health`에서 정상 대상 등록을 확인한다. 이미 활동 중인 공용 서비스는 현재 용량을 유지한다. 외부에서 실제 로그인과 사용자 API가 성공해야 복귀 검증을 완료한다. 시간이 초과되면 ECS 이벤트·중단 이유·CloudWatch 로그·대상 상태를 확인해 승인된 기존 revision 복구 또는 수동 유지로 전환한다. 자동 종료 없이 테스트를 끝내고, 별도 승인된 드레이닝 절차에서만 0으로 내린다.
 
 ## SQS와 절전 검증
 
