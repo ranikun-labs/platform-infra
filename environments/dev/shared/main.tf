@@ -104,7 +104,7 @@ resource "aws_rds_cluster" "database" {
   final_snapshot_identifier   = "${local.name}-final"
   serverlessv2_scaling_configuration {
     min_capacity             = var.database_min_capacity
-    max_capacity             = 2
+    max_capacity             = 1
     seconds_until_auto_pause = var.database_min_capacity == 0 ? var.database_auto_pause_seconds : null
   }
   tags = local.tags
