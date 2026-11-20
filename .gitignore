@@ -1,0 +1,10 @@
+# Terraform working directories, state, and potentially sensitive plans/variables
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfplan.dev-context
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log

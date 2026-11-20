@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Local, single-root DEV operator entry point. See docs/dev-terraform-operator.md.
+set -euo pipefail
+umask 077
+
+usage() {
+  echo 'Usage: dev-terraform plan ROOT PLAN_FILE | apply ROOT PLAN_FILE REVIEWED_SHA256' >&2
+  echo 'Required environment: DEV_AWS_ACCOUNT_ID DEV_AWS_ROLE_NAME DEV_STATE_BUCKET DEV_STATE_REGION' >&2
+  exit 2
+}
+[[ $# -ge 3 ]] || usage
+operation=$1 root=$2 plan_file=$3
+case "$operation:$#" in plan:3|apply:4) ;; *) usage ;; esac
+case "$root" in shared|platform|carelog|finance) ;; *) usage ;; esac
+: "${DEV_AWS_ACCOUNT_ID:?DEV_AWS_ACCOUNT_ID is required}"
+: "${DEV_AWS_ROLE_NAME:?DEV_AWS_ROLE_NAME is required}"
+: "${DEV_STATE_BUCKET:?DEV_STATE_BUCKET is required}"
+: "${DEV_STATE_REGION:?DEV_STATE_REGION is required}"
+[[ $DEV_AWS_ACCOUNT_ID =~ ^[0-9]{12}$ ]] || { echo 'Invalid DEV account ID' >&2; exit 2; }
+[[ $DEV_AWS_ROLE_NAME =~ ^[A-Za-z0-9+=,.@_-]{1,64}$ ]] || { echo 'Invalid role name' >&2; exit 2; }
+[[ $DEV_STATE_BUCKET =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ && $DEV_STATE_REGION =~ ^[a-z0-9-]+$ ]] || { echo 'Invalid backend bucket or region' >&2; exit 2; }
+[[ ${TF_WORKSPACE:-default} == default ]] || { echo 'Only the default workspace is supported' >&2; exit 2; }
+# Do not allow hidden extra Terraform flags to redirect backend, plan, or apply.
+for name in ${!TF_CLI_ARGS@}; do unset "$name"; done
+export TF_IN_AUTOMATION=1 TF_INPUT=0 TF_WORKSPACE=default TF_VAR_aws_account_id="$DEV_AWS_ACCOUNT_ID"
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+root_dir="$repo/environments/dev/$root"
+# Resolve the parent directory before any AWS or backend operation.
+[[ $(basename -- "$plan_file") == *.tfplan ]] || { echo 'Plan filename must end in .tfplan' >&2; exit 2; }
+plan_dir=$(cd -- "$(dirname -- "$plan_file")" && pwd -P) || { echo 'Plan directory must exist' >&2; exit 2; }
+case "$plan_dir/" in "$repo/"*) echo 'Plan must be outside the repository' >&2; exit 2 ;; esac
+plan_file="$plan_dir/$(basename -- "$plan_file")"
+[[ -f $root_dir/versions.tf ]] || { echo 'DEV root is missing' >&2; exit 2; }
+command -v aws >/dev/null && command -v terraform >/dev/null && command -v sha256sum >/dev/null || { echo 'aws, terraform and sha256sum are required' >&2; exit 2; }
+identity=$(aws sts get-caller-identity --query '[Account,Arn]' --output text --no-cli-pager)
+IFS=$'\t' read -r actual_account actual_arn <<< "$identity"
+[[ $actual_account == "$DEV_AWS_ACCOUNT_ID" && $actual_arn == "arn:aws:sts::$DEV_AWS_ACCOUNT_ID:assumed-role/$DEV_AWS_ROLE_NAME/"* && ${actual_arn##*/} != '' ]] || { echo 'Active AWS identity does not match the expected DEV account and assumed role' >&2; exit 1; }
+# Keep the backend initialization local to this invocation and avoid reusing prior root metadata.
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+export TF_DATA_DIR="$work/terraform"
+terraform -chdir="$root_dir" init -input=false -reconfigure -lockfile=readonly \
+  -backend-config="bucket=$DEV_STATE_BUCKET" -backend-config="region=$DEV_STATE_REGION" \
+  -backend-config="allowed_account_ids=[\"$DEV_AWS_ACCOUNT_ID\"]"
+if [[ $operation == plan ]]; then
+  [[ ! -e $plan_file && ! -L $plan_file && ! -e ${plan_file}.dev-context && ! -L ${plan_file}.dev-context ]] || { echo 'Plan file already exists' >&2; exit 1; }
+  plan_path="$plan_file"
+  terraform -chdir="$root_dir" plan -input=false -var="aws_account_id=$DEV_AWS_ACCOUNT_ID" -out="$plan_path"
+  chmod 600 -- "$plan_path"
+  digest=$(sha256sum -- "$plan_path")
+  digest=${digest%% *}
+  printf '%s\n' "$root" "$DEV_AWS_ACCOUNT_ID" "$DEV_AWS_ROLE_NAME" "$DEV_STATE_BUCKET" "$DEV_STATE_REGION" "$digest" > "${plan_path}.dev-context"
+  printf 'Review the saved plan privately, then confirm this SHA-256 when applying:\n%s\n' "$digest"
+else
+  digest=$4
+  [[ $digest =~ ^[0-9a-fA-F]{64}$ && -f $plan_file && ! -L $plan_file ]] || { echo 'A regular plan file and reviewed SHA-256 are required' >&2; exit 2; }
+  [[ -f ${plan_file}.dev-context && ! -L ${plan_file}.dev-context ]] || { echo 'Plan context is missing' >&2; exit 1; }
+  expected_context=$(printf '%s\n' "$root" "$DEV_AWS_ACCOUNT_ID" "$DEV_AWS_ROLE_NAME" "$DEV_STATE_BUCKET" "$DEV_STATE_REGION" "${digest,,}")
+  [[ $(cat -- "${plan_file}.dev-context") == "$expected_context" ]] || { echo 'Plan context does not match this root, identity or backend' >&2; exit 1; }
+  # Apply the copied bytes that were verified, not a path that could be replaced afterward.
+  cp -- "$plan_file" "$work/reviewed.tfplan"
+  actual_digest=$(sha256sum "$work/reviewed.tfplan")
+  [[ ${actual_digest%% *} == "${digest,,}" ]] || { echo 'Plan digest does not match the reviewed SHA-256' >&2; exit 1; }
+  terraform -chdir="$root_dir" apply -input=false "$work/reviewed.tfplan"
+fi

@@ -1,0 +1,45 @@
+name: Terraform validation
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate DEV ${{ matrix.root }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        root: [shared, platform, carelog, finance, release/platform, release/carelog, release/finance]
+    env:
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: 'false'
+      AWS_EC2_METADATA_DISABLED: 'true'
+    defaults:
+      run:
+        working-directory: environments/dev/${{ matrix.root }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - name: Check formatting across roots and modules
+        working-directory: .
+        run: terraform fmt -check -recursive
+      - name: Initialize without backend
+        run: terraform init -backend=false -input=false -lockfile=readonly
+      - name: Validate configuration
+        run: terraform validate -no-color
+      - name: Run mocked contract tests
+        run: terraform test -no-color
+      - name: Test release IAM policy boundaries
+        if: matrix.root == 'release/platform'
+        working-directory: modules/dev-release
+        run: |
+          terraform init -backend=false -input=false -lockfile=readonly
+          terraform test -no-color

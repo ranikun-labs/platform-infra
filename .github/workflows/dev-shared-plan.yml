@@ -1,0 +1,72 @@
+name: DEV shared Terraform plan (draft)
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  plan:
+    if: github.repository == 'ranikun-labs/platform-infra' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev-plan
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: dev-shared-terraform-plan
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+        working-directory: environments/dev/shared
+    env:
+      AWS_REGION: ap-northeast-2
+      AWS_DEFAULT_REGION: ap-northeast-2
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: 'false'
+      TF_VAR_aws_account_id: '124495093425'
+      TF_VAR_aws_region: ap-northeast-2
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: arn:aws:iam::124495093425:role/ranikun-dev-shared-plan
+          aws-region: ap-northeast-2
+          allowed-account-ids: '124495093425'
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - name: Verify AWS identity
+        run: |
+          set -euo pipefail
+          identity=$(aws sts get-caller-identity --query '[Account,Arn]' --output text)
+          read -r account arn <<< "$identity"
+          [[ "$account" == 124495093425 && "$arn" == arn:aws:sts::124495093425:assumed-role/ranikun-dev-shared-plan/* ]]
+      - name: Initialize and plan shared root
+        env:
+          DEV_SHARED_TFVARS_JSON: ${{ secrets.DEV_SHARED_TFVARS_JSON }}
+        run: |
+          set -euo pipefail
+          [[ -n "$DEV_SHARED_TFVARS_JSON" ]] || { echo 'Missing reviewed DEV_SHARED_TFVARS_JSON environment secret' >&2; exit 1; }
+          tfvars=$(mktemp "${RUNNER_TEMP}/dev-shared.XXXXXXXX.tfvars.json")
+          plan=$(mktemp "${RUNNER_TEMP}/dev-shared.XXXXXXXX.tfplan")
+          planlog=$(mktemp "${RUNNER_TEMP}/dev-shared.XXXXXXXX.log")
+          trap 'rm -f -- "$tfvars" "$plan" "$planlog"' EXIT
+          chmod 600 "$tfvars"
+          printf '%s' "$DEV_SHARED_TFVARS_JSON" > "$tfvars"
+          terraform init -input=false -lockfile=readonly \
+            -backend-config='bucket=ranikun-dev-tfstate-124495093425' \
+            -backend-config='region=ap-northeast-2' \
+            -backend-config='allowed_account_ids=["124495093425"]'
+          if ! terraform plan -input=false -lock-timeout=5m -var-file="$tfvars" \
+            -var="aws_account_id=124495093425" -var="aws_region=ap-northeast-2" \
+            -out="$plan" -no-color >"$planlog" 2>&1; then
+            echo 'Terraform plan failed. Inspect diagnostics through an approved private operator path.' >&2
+            exit 1
+          fi
+          terraform show -json "$plan" | jq -r '
+            [.resource_changes[]?.change.actions | join(",")] |
+            "Resource actions: " + ((group_by(.) | map("\(.[0])=\(length)") | join(", ")) // "none")
+          '
