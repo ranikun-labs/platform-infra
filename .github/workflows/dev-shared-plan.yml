@@ -8,6 +8,11 @@ on:
       - 'environments/dev/shared/**'
   workflow_dispatch:
     inputs:
+      nat_free:
+        description: Plan the DEV shared root without a NAT gateway
+        required: true
+        type: boolean
+        default: true
       diagnostics_only:
         description: Print filtered OIDC metadata only; do not call AWS or Terraform
         required: true
@@ -71,6 +76,7 @@ jobs:
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.diagnostics_only) }}
         env:
           DEV_SHARED_TFVARS_JSON: ${{ secrets.DEV_SHARED_TFVARS_JSON }}
+          NAT_FREE: ${{ github.event_name == 'workflow_dispatch' && inputs.nat_free }}
         run: |
           set -euo pipefail
           [[ -n "$DEV_SHARED_TFVARS_JSON" ]] || { echo 'Missing reviewed DEV_SHARED_TFVARS_JSON environment secret' >&2; exit 1; }
@@ -84,7 +90,11 @@ jobs:
             -backend-config='bucket=ranikun-dev-tfstate-124495093425' \
             -backend-config='region=ap-northeast-2' \
             -backend-config='allowed_account_ids=["124495093425"]'
-          if ! terraform plan -input=false -lock-timeout=5m -var-file="$tfvars" \
+          plan_options=()
+          if [[ "$NAT_FREE" == true ]]; then
+            plan_options+=('-var=enable_nat_gateway=false' '-var=database_min_capacity=0' '-var=database_auto_pause_seconds=300')
+          fi
+          if ! terraform plan -input=false -lock-timeout=5m -var-file="$tfvars" "${plan_options[@]}" \
             -var="aws_account_id=124495093425" -var="aws_region=ap-northeast-2" \
             -out="$plan" -no-color >"$planlog" 2>&1; then
             echo 'Terraform plan failed. Inspect diagnostics through an approved private operator path.' >&2
@@ -96,6 +106,18 @@ jobs:
             .values.serverlessv2_scaling_configuration[0] |
             "Aurora DEV: minimum ACUs=\(.min_capacity), auto-pause seconds=\(.seconds_until_auto_pause // "disabled")"
           '
+          if [[ "$NAT_FREE" == true ]]; then
+            terraform show -json "$plan" | jq -e '
+              ([.planned_values.root_module.resources[] |
+                select(.address == "aws_rds_cluster.database") |
+                .values.serverlessv2_scaling_configuration[0] |
+                select(.min_capacity == 0 and .seconds_until_auto_pause == 300)] | length == 1)
+              and
+              ([.planned_values.root_module.resources[] |
+                select(.type == "aws_nat_gateway" or .type == "aws_eip" or .address == "aws_route.private_egress[0]")] | length == 0)
+            ' >/dev/null
+            echo 'NAT-free plan verified: no NAT gateway, NAT EIP, or private egress route; Aurora 0 ACU / 300 seconds.'
+          fi
           terraform show -json "$plan" | jq -r '
             [.resource_changes[]? | {
               address: (.address | if contains("[\"") then split("[\"")[0] + "[key omitted]" else . end),
