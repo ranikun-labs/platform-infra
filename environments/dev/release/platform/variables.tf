@@ -48,3 +48,11 @@ variable "github_oidc_subjects" {
     error_message = "Supply exact publish/deploy subjects for only: gateway, core."
   }
 }
+
+variable "permissions_boundaries" {
+  type = map(object({ publish = string, deploy = string }))
+  validation {
+    condition     = toset(keys(var.permissions_boundaries)) == toset(["gateway", "core"])
+    error_message = "Supply reviewed per-workload publisher and deployer boundaries."
+  }
+}

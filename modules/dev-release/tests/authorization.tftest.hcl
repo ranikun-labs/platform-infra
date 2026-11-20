@@ -4,6 +4,7 @@ mock_provider "aws" {
   }
 }
 variables {
+  permissions_boundaries     = { publish = "arn:aws:iam::123456789012:policy/dev-boundary/dev-carelog-github-publish", deploy = "arn:aws:iam::123456789012:policy/dev-boundary/dev-carelog-github-deploy" }
   github_repository_owner_id = "211108135"
   github_repository_id       = "981081375"
   # Test fixture, not an assertion that Carelog's environment token was observed.
@@ -55,35 +56,40 @@ run "exact_environment_subjects" {
 run "reject_legacy_subject" {
   command = plan
   variables {
-    github_oidc_subjects = { publish = "repo:ranikun-labs/carelog-be:environment:dev-carelog-publish", deploy = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy" }
+    permissions_boundaries = { publish = "arn:aws:iam::123456789012:policy/dev-boundary/dev-carelog-github-publish", deploy = "arn:aws:iam::123456789012:policy/dev-boundary/dev-carelog-github-deploy" }
+    github_oidc_subjects   = { publish = "repo:ranikun-labs/carelog-be:environment:dev-carelog-publish", deploy = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy" }
   }
   expect_failures = [var.github_oidc_subjects]
 }
 run "reject_wildcard_subject" {
   command = plan
   variables {
-    github_oidc_subjects = { publish = "repo:ranikun-labs@211108135/carelog-be@981081375:*", deploy = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy" }
+    permissions_boundaries = { publish = "arn:aws:iam::123456789012:policy/dev-boundary/dev-carelog-github-publish", deploy = "arn:aws:iam::123456789012:policy/dev-boundary/dev-carelog-github-deploy" }
+    github_oidc_subjects   = { publish = "repo:ranikun-labs@211108135/carelog-be@981081375:*", deploy = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy" }
   }
   expect_failures = [var.github_oidc_subjects]
 }
 run "reject_wrong_repository_id" {
   command = plan
   variables {
-    github_oidc_subjects = { publish = "repo:ranikun-labs@211108135/carelog-be@1331151117:environment:dev-carelog-publish", deploy = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy" }
+    permissions_boundaries = { publish = "arn:aws:iam::123456789012:policy/dev-boundary/dev-carelog-github-publish", deploy = "arn:aws:iam::123456789012:policy/dev-boundary/dev-carelog-github-deploy" }
+    github_oidc_subjects   = { publish = "repo:ranikun-labs@211108135/carelog-be@1331151117:environment:dev-carelog-publish", deploy = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy" }
   }
   expect_failures = [var.github_oidc_subjects]
 }
 run "reject_wrong_environment" {
   command = plan
   variables {
-    github_oidc_subjects = { publish = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy", deploy = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy" }
+    permissions_boundaries = { publish = "arn:aws:iam::123456789012:policy/dev-boundary/dev-carelog-github-publish", deploy = "arn:aws:iam::123456789012:policy/dev-boundary/dev-carelog-github-deploy" }
+    github_oidc_subjects   = { publish = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy", deploy = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy" }
   }
   expect_failures = [var.github_oidc_subjects]
 }
 run "reject_empty_subject" {
   command = plan
   variables {
-    github_oidc_subjects = { publish = "", deploy = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy" }
+    permissions_boundaries = { publish = "arn:aws:iam::123456789012:policy/dev-boundary/dev-carelog-github-publish", deploy = "arn:aws:iam::123456789012:policy/dev-boundary/dev-carelog-github-deploy" }
+    github_oidc_subjects   = { publish = "", deploy = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy" }
   }
   expect_failures = [var.github_oidc_subjects]
 }

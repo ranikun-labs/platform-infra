@@ -7,6 +7,7 @@ module "release" {
   github_repository_owner_id = "211108135"
   github_repository_id       = "1327477262"
   github_oidc_subjects       = var.github_oidc_subjects[each.key]
+  permissions_boundaries     = var.permissions_boundaries[each.key]
   github_oidc_provider_arn   = var.github_oidc_provider_arn
   cluster_name               = var.cluster_name
   service_name               = each.value

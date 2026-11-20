@@ -40,3 +40,14 @@ variable "github_oidc_subjects" {
     error_message = "Each exact subject must bind this repository name, immutable owner/repository IDs, workload and its publish/deploy environment; empty, legacy, wildcard or cross-target values are rejected."
   }
 }
+
+variable "permissions_boundaries" {
+  type = object({ publish = string, deploy = string })
+  validation {
+    condition = alltrue([
+      for phase, arn in var.permissions_boundaries :
+      arn == "arn:aws:iam::${var.aws_account_id}:policy/dev-boundary/${var.service_name}-github-${phase}"
+    ])
+    error_message = "Supply the exact reviewed boundary ARN for each role."
+  }
+}

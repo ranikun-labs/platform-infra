@@ -4,6 +4,10 @@ mock_provider "aws" {
   }
 }
 variables {
+  permissions_boundaries = {
+    gateway = { publish = "arn:aws:iam::123456789012:policy/dev-boundary/ranikun-platform-dev-gateway-github-publish", deploy = "arn:aws:iam::123456789012:policy/dev-boundary/ranikun-platform-dev-gateway-github-deploy" }
+    core    = { publish = "arn:aws:iam::123456789012:policy/dev-boundary/ranikun-platform-dev-core-github-publish", deploy = "arn:aws:iam::123456789012:policy/dev-boundary/ranikun-platform-dev-core-github-deploy" }
+  }
   # Test-only expected pattern; these are not observed minted application claims.
   github_oidc_subjects = {
     gateway = { publish = "repo:ranikun-labs@211108135/platform-services@1327477262:environment:dev-gateway-publish", deploy = "repo:ranikun-labs@211108135/platform-services@1327477262:environment:dev-gateway-deploy" }

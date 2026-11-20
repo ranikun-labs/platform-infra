@@ -41,14 +41,16 @@ resource "aws_ecr_repository" "service" {
   tags         = var.tags
 }
 resource "aws_iam_role" "publisher" {
-  name               = "${var.service_name}-github-publisher"
-  assume_role_policy = data.aws_iam_policy_document.trust["publish"].json
-  tags               = var.tags
+  name                 = "${var.service_name}-github-publisher"
+  assume_role_policy   = data.aws_iam_policy_document.trust["publish"].json
+  permissions_boundary = var.permissions_boundaries.publish
+  tags                 = var.tags
 }
 resource "aws_iam_role" "deployer" {
-  name               = "${var.service_name}-github-deployer"
-  assume_role_policy = data.aws_iam_policy_document.trust["deploy"].json
-  tags               = var.tags
+  name                 = "${var.service_name}-github-deployer"
+  assume_role_policy   = data.aws_iam_policy_document.trust["deploy"].json
+  permissions_boundary = var.permissions_boundaries.deploy
+  tags                 = var.tags
 }
 data "aws_iam_policy_document" "publisher" {
   statement {

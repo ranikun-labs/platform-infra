@@ -41,3 +41,11 @@ variable "github_oidc_subjects" {
     error_message = "Supply exact publish/deploy subjects for only: finance."
   }
 }
+
+variable "permissions_boundaries" {
+  type = map(object({ publish = string, deploy = string }))
+  validation {
+    condition     = toset(keys(var.permissions_boundaries)) == toset(["finance"])
+    error_message = "Supply reviewed per-workload publisher and deployer boundaries."
+  }
+}

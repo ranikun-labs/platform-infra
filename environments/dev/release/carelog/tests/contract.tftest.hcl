@@ -4,6 +4,9 @@ mock_provider "aws" {
   }
 }
 variables {
+  permissions_boundaries = {
+    carelog = { publish = "arn:aws:iam::123456789012:policy/dev-boundary/ranikun-carelog-dev-api-github-publish", deploy = "arn:aws:iam::123456789012:policy/dev-boundary/ranikun-carelog-dev-api-github-deploy" }
+  }
   # Test-only expected pattern; these are not observed minted application claims.
   github_oidc_subjects = {
     carelog = { publish = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-publish", deploy = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy" }
