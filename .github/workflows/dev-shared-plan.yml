@@ -2,6 +2,12 @@ name: DEV shared Terraform plan (draft)
 
 on:
   workflow_dispatch:
+    inputs:
+      diagnostics_only:
+        description: Print filtered OIDC metadata only; do not call AWS or Terraform
+        required: true
+        type: boolean
+        default: true
 
 permissions: {}
 
@@ -29,22 +35,35 @@ jobs:
       TF_VAR_aws_region: ap-northeast-2
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          persist-credentials: false
+      - name: Test OIDC diagnostic output filtering
+        working-directory: .
+        run: python3 -m unittest discover -s .github/scripts -p 'test_oidc_claim_diagnostics.py' -v
+      - name: Print filtered GitHub OIDC metadata
+        working-directory: .
+        run: python3 .github/scripts/oidc_claim_diagnostics.py
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: ${{ ! inputs.diagnostics_only }}
         with:
           role-to-assume: arn:aws:iam::124495093425:role/ranikun-dev-shared-plan
           aws-region: ap-northeast-2
+          audience: sts.amazonaws.com
           allowed-account-ids: '124495093425'
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        if: ${{ ! inputs.diagnostics_only }}
         with:
           terraform_version: 1.10.5
           terraform_wrapper: false
       - name: Verify AWS identity
+        if: ${{ ! inputs.diagnostics_only }}
         run: |
           set -euo pipefail
           identity=$(aws sts get-caller-identity --query '[Account,Arn]' --output text)
           read -r account arn <<< "$identity"
           [[ "$account" == 124495093425 && "$arn" == arn:aws:sts::124495093425:assumed-role/ranikun-dev-shared-plan/* ]]
       - name: Initialize and plan shared root
+        if: ${{ ! inputs.diagnostics_only }}
         env:
           DEV_SHARED_TFVARS_JSON: ${{ secrets.DEV_SHARED_TFVARS_JSON }}
         run: |
