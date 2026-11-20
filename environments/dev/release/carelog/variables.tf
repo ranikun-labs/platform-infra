@@ -32,3 +32,20 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+
+variable "github_oidc_subjects" {
+  type        = map(object({ publish = string, deploy = string }))
+  description = "Confirmed exact per-environment caller subjects; keys must match this owner's workloads. No fallback to inferred or legacy subjects."
+  validation {
+    condition     = toset(keys(var.github_oidc_subjects)) == toset(["carelog"])
+    error_message = "Supply exact publish/deploy subjects for only: carelog."
+  }
+}
+
+variable "permissions_boundaries" {
+  type = map(object({ publish = string, deploy = string }))
+  validation {
+    condition     = toset(keys(var.permissions_boundaries)) == toset(["carelog"])
+    error_message = "Supply reviewed per-workload publisher and deployer boundaries."
+  }
+}

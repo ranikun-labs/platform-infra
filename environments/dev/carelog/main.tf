@@ -1,7 +1,7 @@
 module "service" {
   source                    = "../../../modules/ecs-service"
   region                    = var.region
-  name                      = "dev-carelog"
+  name                      = "ranikun-carelog-dev-api"
   cluster_arn               = var.shared.cluster_arn
   vpc_id                    = var.shared.vpc_id
   private_subnet_ids        = var.workload_public_ip ? var.workload_public_subnet_ids : var.shared.private_subnet_ids

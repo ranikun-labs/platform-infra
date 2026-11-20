@@ -29,26 +29,28 @@ data "aws_iam_policy_document" "trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:environment:dev-${var.workload}-${each.key}"]
+      values   = [var.github_oidc_subjects[each.key]]
     }
   }
 }
 resource "aws_ecr_repository" "service" {
-  name                 = var.service_name
+  name                 = var.ecr_repository_name
   image_tag_mutability = "IMMUTABLE"
   image_scanning_configuration { scan_on_push = true }
   force_delete = false
   tags         = var.tags
 }
 resource "aws_iam_role" "publisher" {
-  name               = "${var.service_name}-github-publisher"
-  assume_role_policy = data.aws_iam_policy_document.trust["publish"].json
-  tags               = var.tags
+  name                 = "${var.service_name}-github-publisher"
+  assume_role_policy   = data.aws_iam_policy_document.trust["publish"].json
+  permissions_boundary = var.permissions_boundaries.publish
+  tags                 = var.tags
 }
 resource "aws_iam_role" "deployer" {
-  name               = "${var.service_name}-github-deployer"
-  assume_role_policy = data.aws_iam_policy_document.trust["deploy"].json
-  tags               = var.tags
+  name                 = "${var.service_name}-github-deployer"
+  assume_role_policy   = data.aws_iam_policy_document.trust["deploy"].json
+  permissions_boundary = var.permissions_boundaries.deploy
+  tags                 = var.tags
 }
 data "aws_iam_policy_document" "publisher" {
   statement {
@@ -120,3 +122,4 @@ output "publisher_role_arn" { value = aws_iam_role.publisher.arn }
 output "deployer_role_arn" { value = aws_iam_role.deployer.arn }
 output "ecs_service_name" { value = var.service_name }
 output "task_family" { value = var.service_name }
+output "ecr_repository_name" { value = aws_ecr_repository.service.name }
