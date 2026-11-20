@@ -63,7 +63,7 @@ variable "database_master_username" {
 variable "database_min_capacity" {
   description = "Serverless v2 minimum ACUs. Set to 0 only with a compatible Aurora version and auto-pause support."
   type        = number
-  default     = 0.5
+  default     = 0
   validation {
     condition     = contains([0, 0.5, 1, 1.5, 2], var.database_min_capacity)
     error_message = "DEV minimum must be 0, 0.5, 1, 1.5, or 2 ACUs."
@@ -72,7 +72,7 @@ variable "database_min_capacity" {
 variable "database_auto_pause_seconds" {
   description = "Idle interval for min 0; ignored otherwise."
   type        = number
-  default     = 900
+  default     = 300
   validation {
     condition     = var.database_auto_pause_seconds >= 300 && var.database_auto_pause_seconds <= 86400
     error_message = "Auto-pause must be between 300 and 86400 seconds."

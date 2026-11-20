@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/dev-shared-plan.yml'
+      - 'environments/dev/shared/**'
   workflow_dispatch:
     inputs:
       diagnostics_only:
@@ -89,6 +90,12 @@ jobs:
             echo 'Terraform plan failed. Inspect diagnostics through an approved private operator path.' >&2
             exit 1
           fi
+          terraform show -json "$plan" | jq -er '
+            .planned_values.root_module.resources[] |
+            select(.address == "aws_rds_cluster.database") |
+            .values.serverlessv2_scaling_configuration[0] |
+            "Aurora DEV: minimum ACUs=\(.min_capacity), auto-pause seconds=\(.seconds_until_auto_pause // "disabled")"
+          '
           terraform show -json "$plan" | jq -r '
             [.resource_changes[]? | {
               address: (.address | if contains("[\"") then split("[\"")[0] + "[key omitted]" else . end),
