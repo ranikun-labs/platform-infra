@@ -1,3 +1,9 @@
+locals {
+  execution_secret_arns = var.cloudflared == null ? var.execution_secret_arns : setunion(
+    var.execution_secret_arns, toset([var.cloudflared.token_secret_arn])
+  )
+}
+
 data "aws_iam_policy_document" "assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -29,17 +35,17 @@ data "aws_iam_policy_document" "execution" {
   }
   statement {
     actions   = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
-    resources = [var.ecr_repository_arn]
+    resources = concat([var.ecr_repository_arn], var.cloudflared == null ? [] : [var.cloudflared.ecr_repository_arn])
   }
   statement {
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
     resources = ["${aws_cloudwatch_log_group.service.arn}:*"]
   }
   dynamic "statement" {
-    for_each = length(var.execution_secret_arns) > 0 ? [1] : []
+    for_each = length(local.execution_secret_arns) > 0 ? [1] : []
     content {
       actions   = ["secretsmanager:GetSecretValue", "ssm:GetParameters"]
-      resources = tolist(var.execution_secret_arns)
+      resources = tolist(local.execution_secret_arns)
     }
   }
   dynamic "statement" {
@@ -94,7 +100,7 @@ resource "aws_ecs_task_definition" "baseline" {
   task_role_arn            = aws_iam_role.app.arn
   skip_destroy             = true
   lifecycle { create_before_destroy = true }
-  container_definitions = jsonencode([{
+  container_definitions = jsonencode(concat([{
     name             = var.name
     image            = var.image
     essential        = true
@@ -104,7 +110,22 @@ resource "aws_ecs_task_definition" "baseline" {
     secrets          = [for key in sort(keys(var.secrets)) : { name = key, valueFrom = var.secrets[key] }]
     healthCheck      = { command = var.health_check.command, interval = var.health_check.interval, timeout = var.health_check.timeout, retries = var.health_check.retries, startPeriod = var.health_check.start_period }
     logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.service.name, awslogs-region = var.region, awslogs-stream-prefix = "app" } }
-  }])
+    }], var.cloudflared == null ? [] : [{
+    name      = "cloudflared"
+    image     = var.cloudflared.image
+    essential = true
+    command   = ["tunnel", "--no-autoupdate", "run"]
+    dependsOn = [{ containerName = var.name, condition = "HEALTHY" }]
+    secrets   = [{ name = "TUNNEL_TOKEN", valueFrom = var.cloudflared.token_secret_arn }]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.service.name
+        awslogs-region        = var.region
+        awslogs-stream-prefix = "tunnel"
+      }
+    }
+  }]))
   tags = var.tags
 }
 resource "aws_ecs_service" "service" {
@@ -123,7 +144,7 @@ resource "aws_ecs_service" "service" {
   network_configuration {
     subnets          = var.private_subnet_ids
     security_groups  = [aws_security_group.service.id]
-    assign_public_ip = false
+    assign_public_ip = var.assign_public_ip
   }
   service_registries { registry_arn = aws_service_discovery_service.service.arn }
   dynamic "load_balancer" {

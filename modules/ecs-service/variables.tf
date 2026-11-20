@@ -47,3 +47,26 @@ variable "health_check_grace_period_seconds" {
   type    = number
   default = 60
 }
+
+variable "cloudflared" {
+  description = "Optional DEV Cloudflare Tunnel connector sharing the gateway Task network. Use a mirrored image and a dedicated Secrets Manager token."
+  type = object({
+    image              = string
+    ecr_repository_arn = string
+    token_secret_arn   = string
+  })
+  default = null
+  validation {
+    condition = var.cloudflared == null ? true : (
+      can(regex("@sha256:[0-9a-f]{64}$", var.cloudflared.image)) &&
+      can(regex("^arn:aws:ecr:[^:]+:[0-9]{12}:repository/.+$", var.cloudflared.ecr_repository_arn)) &&
+      can(regex("^arn:aws:secretsmanager:[^:]+:[0-9]{12}:secret:.+$", var.cloudflared.token_secret_arn))
+    )
+    error_message = "The Tunnel connector requires a digest-pinned image, ECR repository ARN and Secrets Manager token ARN."
+  }
+}
+
+variable "assign_public_ip" {
+  type    = bool
+  default = false
+}

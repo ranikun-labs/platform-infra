@@ -22,6 +22,14 @@ DEV state는 `dev/{shared,platform,carelog,finance}/terraform.tfstate` 키와 �
 
 GitHub의 기본 검사 workflow는 backend 없이 검사한다. 실제 plan/apply는 계정과 루트가 확인된 별도 환경에서 단일 루트의 검토 대상 커밋과 실행 역할로 진행한다. 저장한 plan을 비공개로 취급하고, 승인받은 동일 plan만 적용한다. Merge는 apply를 시작하지 않는다. IaC는 설정 변경으로 생긴 baseline task definition을 등록한다. 실행 중인 revision과 desired count의 변경은 해당 서비스의 릴리스·스케일 제어 절차가 맡는다. 구성 변경으로 baseline revision이 바뀌면 릴리스 절차에서 그 revision을 검토 후 활성화한다. 이전 revision은 서비스가 참조하지 않고 롤백 보존 기간이 지난 뒤 릴리스 책임자가 정리한다.
 
+## Cloudflare Tunnel DEV 후보
+
+`platform`의 선택 입력 `gateway_cloudflared`에 DEV ECR로 미러링한 cloudflared 이미지의 고정 digest, 해당 ECR 저장소 ARN, 전용 Secrets Manager 토큰 ARN을 지정한다. 고객 관리형 KMS 키를 쓰는 경우 해당 키 ARN은 Gateway의 `execution_kms_key_arns`에 넣는다. 토큰 값은 Terraform 입력에 넣지 않는다.
+
+Cloudflare의 원격 관리 Tunnel에 고정 DEV API 호스트명을 등록하고 대상을 `http://localhost:8080`으로 지정한다. 커넥터는 Gateway와 같은 Task에서 Gateway 헬스 체크 성공 후 시작한다. 외부에서 Task에 인바운드 포트를 열지 않는다. Cloudflare로 나갈 TCP 또는 UDP 7844와 ECR·Secrets·Logs 및 제품 OAuth·캐시에 필요한 송신 연결을 실제 Task에서 확인한다.
+
+ALB를 끄려면 Gateway Tunnel 입력이 필요하다. NAT 없는 경로는 각 루트에서 public subnet과 공개 IP를 명시 선택한다. 새 서비스의 최초 Task는 이전 revision을 지정하지 않으면 Terraform baseline을 사용한다. 기존 서비스에 커넥터를 처음 추가할 때는 현재 revision을 복구용으로 기록하고, 검토한 `gateway_baseline_task_definition_arn`을 승인된 DEV 운영 경로에서 직접 활성화한다. 이미지 릴리스는 활성 revision의 앱 이미지만 바꾸므로 신규 커넥터를 도입할 수 없다. 기존 ALB를 사용 중이면 고정 Tunnel 호스트명과 복구 동작을 검증한 뒤 별도 plan으로 ALB를 제거한다. Tunnel 연결, 같은 호스트명에서 두 제품의 로그인과 저장·재조회, 0→1 재기동을 확인한다.
+
 ## 수동 0→1 검증
 
 승인된 DEV 역할·리전으로 진행한다. `aws sts get-caller-identity`에서 실행 역할을 확인하고, `shared`의 `cluster_arn`과 각 루트의 서비스 출력, 승인된 활성 revision ARN을 사용한다. 동일 서비스에서 다른 릴리스·스케일러·운영자가 동시에 desired count를 갱신하는지 먼저 확인한다. 아래 조회와 갱신 사이에 AWS가 조건부 업데이트를 보장하지 않으므로 단일 운영자 조건에서만 실행한다.
@@ -39,7 +47,7 @@ aws ecs wait services-stable --region "$DEV_AWS_REGION" \
   --cluster "$DEV_CLUSTER_ARN" --services "$DEV_SERVICE_NAME"
 ```
 
-Core와 선택한 제품의 내부 상태·DB 접근부터 확인하고, SCG는 Platform의 `gateway_target_group_arn`으로 `aws elbv2 describe-target-health`에서 정상 대상 등록을 확인한다. 이미 활동 중인 공용 서비스는 현재 용량을 유지한다. 외부에서 실제 로그인과 사용자 API가 성공해야 복귀 검증을 완료한다. 시간이 초과되면 ECS 이벤트·중단 이유·CloudWatch 로그·대상 상태를 확인해 승인된 기존 revision 복구 또는 수동 유지로 전환한다. 자동 종료 없이 테스트를 끝내고, 별도 승인된 드레이닝 절차에서만 0으로 내린다.
+Core와 선택한 제품의 내부 상태·DB 접근부터 확인한다. ALB를 쓰는 경우 대상 그룹 상태를 확인하고, Tunnel인 경우 Gateway 컨테이너 헬스 및 Cloudflare Tunnel 연결 상태와 외부 API readiness를 확인한다. 이미 활동 중인 공용 서비스는 현재 용량을 유지한다. 외부에서 실제 로그인과 사용자 API가 성공해야 복귀 검증을 완료한다. 시간이 초과되면 ECS 이벤트·중단 이유·CloudWatch 로그·대상 상태를 확인해 승인된 기존 revision 복구 또는 수동 유지로 전환한다. 자동 종료 없이 테스트를 끝내고, 별도 승인된 드레이닝 절차에서만 0으로 내린다.
 
 ## SQS와 절전 검증
 

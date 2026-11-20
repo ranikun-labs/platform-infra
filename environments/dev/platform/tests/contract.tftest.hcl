@@ -47,7 +47,7 @@ run "https_ingress_and_audit_disabled" {
   command = plan
 
   assert {
-    condition     = aws_lb_listener.https.protocol == "HTTPS" && aws_lb_target_group.gateway.target_type == "ip" && aws_lb_target_group.gateway.health_check[0].port == "9091"
+    condition     = aws_lb_listener.https[0].protocol == "HTTPS" && aws_lb_target_group.gateway[0].target_type == "ip" && aws_lb_target_group.gateway[0].health_check[0].port == "9091"
     error_message = "HTTPS must target SCG through its IP target group and separate readiness port."
   }
   assert {
@@ -74,4 +74,32 @@ run "audit_enabled_with_explicit_contract" {
     condition     = length(aws_sqs_queue.audit_dlq) == 1 && aws_sqs_queue.audit[0].sqs_managed_sse_enabled && aws_sqs_queue.audit_dlq[0].sqs_managed_sse_enabled
     error_message = "Audit delivery must use encryption and a dedicated DLQ."
   }
+}
+
+run "tunnel_no_alb_public_egress" {
+  command = plan
+  variables {
+    enable_alb             = false
+    workload_public_ip     = true
+    certificate_arn        = null
+    alb_ingress_cidrs      = []
+    gateway_readiness_path = null
+    gateway_cloudflared = {
+      image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/cloudflared"
+      token_secret_arn   = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:test-tunnel-abcdef"
+    }
+  }
+  assert {
+    condition     = length(aws_lb.gateway) == 0 && length(aws_vpc_security_group_ingress_rule.gateway_alb) == 0 && module.gateway.service_name != null
+    error_message = "No ALB may exist in the public egress tunnel mode."
+  }
+}
+
+run "no_alb_requires_connector" {
+  command = plan
+  variables {
+    enable_alb = false
+  }
+  expect_failures = [var.gateway_cloudflared]
 }

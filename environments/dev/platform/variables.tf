@@ -21,10 +21,20 @@ variable "namespace_id" { type = string }
 variable "certificate_arn" {
   type        = string
   description = "Issued ACM certificate in the ALB region."
+  default     = null
+  validation {
+    condition     = !var.enable_alb || (var.certificate_arn == null ? false : can(regex("^arn:aws:acm:", var.certificate_arn)))
+    error_message = "An ACM certificate ARN is required when ALB is enabled."
+  }
 }
 variable "alb_ingress_cidrs" {
   type        = list(string)
   description = "Approved IPv4 sources for HTTPS; restrict to the verified edge where possible."
+  default     = []
+  validation {
+    condition     = !var.enable_alb || length(var.alb_ingress_cidrs) > 0
+    error_message = "ALB requires at least one approved ingress CIDR."
+  }
 }
 variable "namespace_name" {
   type        = string
@@ -59,4 +69,13 @@ variable "core_desired_count" {
 variable "tags" {
   type    = map(string)
   default = {}
+}
+
+variable "enable_alb" {
+  type    = bool
+  default = true
+}
+variable "workload_public_ip" {
+  type    = bool
+  default = false
 }
