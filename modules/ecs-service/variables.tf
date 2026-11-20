@@ -65,3 +65,8 @@ variable "cloudflared" {
     error_message = "The Tunnel connector requires a digest-pinned image, ECR repository ARN and Secrets Manager token ARN."
   }
 }
+
+variable "assign_public_ip" {
+  type    = bool
+  default = false
+}

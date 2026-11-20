@@ -60,3 +60,12 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+
+variable "enable_alb" {
+  type    = bool
+  default = true
+}
+variable "workload_public_ip" {
+  type    = bool
+  default = false
+}

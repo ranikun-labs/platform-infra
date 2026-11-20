@@ -34,7 +34,8 @@ module "gateway" {
   name                      = "${var.name_prefix}-gateway"
   cluster_arn               = var.cluster_arn
   vpc_id                    = var.vpc_id
-  private_subnet_ids        = var.private_subnet_ids
+  private_subnet_ids        = var.workload_public_ip ? var.public_subnet_ids : var.private_subnet_ids
+  assign_public_ip          = var.workload_public_ip
   namespace_id              = var.namespace_id
   image                     = var.gateway_runtime.image
   ecr_repository_arn        = var.gateway_runtime.ecr_repository_arn
@@ -43,7 +44,7 @@ module "gateway" {
   memory                    = var.gateway_runtime.memory
   desired_count             = var.gateway_desired_count
   first_task_definition_arn = var.gateway_first_task_definition_arn
-  target_group_arn          = aws_lb_target_group.gateway.arn
+  target_group_arn          = var.enable_alb ? aws_lb_target_group.gateway[0].arn : null
   environment = merge(var.gateway_runtime.environment, {
     PLATFORM_GATEWAY_PORT            = "8080"
     PLATFORM_GATEWAY_MANAGEMENT_PORT = "9091"
@@ -64,7 +65,8 @@ module "core" {
   name                      = "${var.name_prefix}-core"
   cluster_arn               = var.cluster_arn
   vpc_id                    = var.vpc_id
-  private_subnet_ids        = var.private_subnet_ids
+  private_subnet_ids        = var.workload_public_ip ? var.public_subnet_ids : var.private_subnet_ids
+  assign_public_ip          = var.workload_public_ip
   namespace_id              = var.namespace_id
   image                     = var.core_runtime.image
   ecr_repository_arn        = var.core_runtime.ecr_repository_arn
@@ -82,17 +84,17 @@ module "core" {
   tags                      = var.tags
 }
 resource "aws_vpc_security_group_egress_rule" "alb_gateway" {
-  for_each                     = toset(["8080", "9091"])
-  security_group_id            = aws_security_group.alb.id
+  for_each                     = var.enable_alb ? toset(["8080", "9091"]) : toset([])
+  security_group_id            = aws_security_group.alb[0].id
   referenced_security_group_id = module.gateway.security_group_id
   from_port                    = tonumber(each.value)
   to_port                      = tonumber(each.value)
   ip_protocol                  = "tcp"
 }
 resource "aws_vpc_security_group_ingress_rule" "gateway_alb" {
-  for_each                     = toset(["8080", "9091"])
+  for_each                     = var.enable_alb ? toset(["8080", "9091"]) : toset([])
   security_group_id            = module.gateway.security_group_id
-  referenced_security_group_id = aws_security_group.alb.id
+  referenced_security_group_id = aws_security_group.alb[0].id
   from_port                    = tonumber(each.value)
   to_port                      = tonumber(each.value)
   ip_protocol                  = "tcp"
@@ -108,7 +110,7 @@ output "gateway_security_group_id" { value = module.gateway.security_group_id }
 output "core_security_group_id" { value = module.core.security_group_id }
 output "gateway_service_name" { value = module.gateway.service_name }
 output "core_service_name" { value = module.core.service_name }
-output "alb_dns_name" { value = aws_lb.gateway.dns_name }
-output "alb_zone_id" { value = aws_lb.gateway.zone_id }
+output "alb_dns_name" { value = var.enable_alb ? aws_lb.gateway[0].dns_name : null }
+output "alb_zone_id" { value = var.enable_alb ? aws_lb.gateway[0].zone_id : null }
 output "gateway_baseline_task_definition_arn" { value = module.gateway.baseline_task_definition_arn }
 output "core_baseline_task_definition_arn" { value = module.core.baseline_task_definition_arn }

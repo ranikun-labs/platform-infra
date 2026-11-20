@@ -1,4 +1,5 @@
 resource "aws_security_group" "alb" {
+  count       = var.enable_alb ? 1 : 0
   name_prefix = "${var.name_prefix}-alb-"
   description = "HTTPS ingress to Gateway only"
   vpc_id      = var.vpc_id
@@ -6,8 +7,8 @@ resource "aws_security_group" "alb" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "https" {
-  for_each          = toset(var.alb_ingress_cidrs)
-  security_group_id = aws_security_group.alb.id
+  for_each          = var.enable_alb ? toset(var.alb_ingress_cidrs) : toset([])
+  security_group_id = aws_security_group.alb[0].id
   cidr_ipv4         = each.value
   from_port         = 443
   to_port           = 443
@@ -15,14 +16,16 @@ resource "aws_vpc_security_group_ingress_rule" "https" {
 }
 
 resource "aws_lb" "gateway" {
+  count              = var.enable_alb ? 1 : 0
   name               = "${var.name_prefix}-gateway"
   internal           = false
   load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
+  security_groups    = [aws_security_group.alb[0].id]
   subnets            = var.public_subnet_ids
 }
 
 resource "aws_lb_target_group" "gateway" {
+  count       = var.enable_alb ? 1 : 0
   name        = "${var.name_prefix}-gateway"
   port        = 8080
   protocol    = "HTTP"
@@ -51,17 +54,18 @@ variable "gateway_readiness_path" {
 }
 
 resource "aws_lb_listener" "https" {
-  load_balancer_arn = aws_lb.gateway.arn
+  count             = var.enable_alb ? 1 : 0
+  load_balancer_arn = aws_lb.gateway[0].arn
   port              = 443
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn   = var.certificate_arn
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.gateway.arn
+    target_group_arn = aws_lb_target_group.gateway[0].arn
   }
 }
 
 output "gateway_target_group_arn" {
-  value = aws_lb_target_group.gateway.arn
+  value = var.enable_alb ? aws_lb_target_group.gateway[0].arn : null
 }

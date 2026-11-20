@@ -45,3 +45,16 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+
+variable "workload_public_ip" {
+  type    = bool
+  default = false
+}
+variable "workload_public_subnet_ids" {
+  type    = list(string)
+  default = []
+  validation {
+    condition     = !var.workload_public_ip || length(var.workload_public_subnet_ids) > 0
+    error_message = "Public IP tasks require explicit public subnets."
+  }
+}

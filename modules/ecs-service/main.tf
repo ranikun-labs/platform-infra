@@ -144,7 +144,7 @@ resource "aws_ecs_service" "service" {
   network_configuration {
     subnets          = var.private_subnet_ids
     security_groups  = [aws_security_group.service.id]
-    assign_public_ip = false
+    assign_public_ip = var.assign_public_ip
   }
   service_registries { registry_arn = aws_service_discovery_service.service.arn }
   dynamic "load_balancer" {
