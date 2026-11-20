@@ -55,6 +55,7 @@ module "gateway" {
   health_check           = var.gateway_runtime.health_check
   log_retention_days     = var.gateway_runtime.log_retention_days
   tags                   = var.tags
+  cloudflared            = var.gateway_cloudflared
   depends_on             = [aws_lb_listener.https]
 }
 module "core" {

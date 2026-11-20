@@ -22,6 +22,14 @@ DEV state는 `dev/{shared,platform,carelog,finance}/terraform.tfstate` 키와 �
 
 GitHub의 기본 검사 workflow는 backend 없이 검사한다. 실제 plan/apply는 계정과 루트가 확인된 별도 환경에서 단일 루트의 검토 대상 커밋과 실행 역할로 진행한다. 저장한 plan을 비공개로 취급하고, 승인받은 동일 plan만 적용한다. Merge는 apply를 시작하지 않는다. IaC는 설정 변경으로 생긴 baseline task definition을 등록한다. 실행 중인 revision과 desired count의 변경은 해당 서비스의 릴리스·스케일 제어 절차가 맡는다. 구성 변경으로 baseline revision이 바뀌면 릴리스 절차에서 그 revision을 검토 후 활성화한다. 이전 revision은 서비스가 참조하지 않고 롤백 보존 기간이 지난 뒤 릴리스 책임자가 정리한다.
 
+## Cloudflare Tunnel DEV 후보
+
+`platform`의 선택 입력 `gateway_cloudflared`에 DEV ECR로 미러링한 cloudflared 이미지의 고정 digest, 해당 ECR 저장소 ARN, 전용 Secrets Manager 토큰 ARN을 지정한다. 고객 관리형 KMS 키를 쓰는 경우 해당 키 ARN은 Gateway의 `execution_kms_key_arns`에 넣는다. 토큰 값은 Terraform 입력에 넣지 않는다.
+
+Cloudflare의 원격 관리 Tunnel에 고정 DEV API 호스트명을 등록하고 대상을 `http://localhost:8080`으로 지정한다. 커넥터는 Gateway와 같은 Task에서 Gateway 헬스 체크 성공 후 시작한다. 외부에서 Task에 인바운드 포트를 열지 않는다. Cloudflare로 나갈 TCP 또는 UDP 7844와 ECR·Secrets·Logs 및 제품 OAuth·캐시에 필요한 송신 연결을 실제 Task에서 확인한다.
+
+이 선택 입력은 커넥터 컨테이너를 추가한다. ALB 제거와 NAT 없는 서브넷·공개 IP 선택은 별도 네트워크 구성을 적용한 뒤 확인한다. 최초 활성화는 기존 릴리스 경계에서 새 baseline Task revision을 대상으로 진행한다. Tunnel 연결, 같은 호스트명에서 두 제품의 로그인과 저장·재조회, 0→1 재기동을 확인한다.
+
 ## 수동 0→1 검증
 
 승인된 DEV 역할·리전으로 진행한다. `aws sts get-caller-identity`에서 실행 역할을 확인하고, `shared`의 `cluster_arn`과 각 루트의 서비스 출력, 승인된 활성 revision ARN을 사용한다. 동일 서비스에서 다른 릴리스·스케일러·운영자가 동시에 desired count를 갱신하는지 먼저 확인한다. 아래 조회와 갱신 사이에 AWS가 조건부 업데이트를 보장하지 않으므로 단일 운영자 조건에서만 실행한다.
