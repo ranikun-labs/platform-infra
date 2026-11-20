@@ -1,6 +1,10 @@
-name: DEV shared Terraform plan (draft)
+name: DEV shared Terraform plan
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/dev-shared-plan.yml'
   workflow_dispatch:
     inputs:
       diagnostics_only:
@@ -44,26 +48,26 @@ jobs:
         working-directory: .
         run: python3 .github/scripts/oidc_claim_diagnostics.py
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        if: ${{ ! inputs.diagnostics_only }}
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.diagnostics_only) }}
         with:
           role-to-assume: arn:aws:iam::124495093425:role/ranikun-dev-shared-plan
           aws-region: ap-northeast-2
           audience: sts.amazonaws.com
           allowed-account-ids: '124495093425'
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
-        if: ${{ ! inputs.diagnostics_only }}
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.diagnostics_only) }}
         with:
           terraform_version: 1.10.5
           terraform_wrapper: false
       - name: Verify AWS identity
-        if: ${{ ! inputs.diagnostics_only }}
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.diagnostics_only) }}
         run: |
           set -euo pipefail
           identity=$(aws sts get-caller-identity --query '[Account,Arn]' --output text)
           read -r account arn <<< "$identity"
           [[ "$account" == 124495093425 && "$arn" == arn:aws:sts::124495093425:assumed-role/ranikun-dev-shared-plan/* ]]
       - name: Initialize and plan shared root
-        if: ${{ ! inputs.diagnostics_only }}
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.diagnostics_only) }}
         env:
           DEV_SHARED_TFVARS_JSON: ${{ secrets.DEV_SHARED_TFVARS_JSON }}
         run: |
