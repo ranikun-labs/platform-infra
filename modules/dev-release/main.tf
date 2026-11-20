@@ -29,7 +29,7 @@ data "aws_iam_policy_document" "trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:environment:dev-${var.workload}-${each.key}"]
+      values   = [var.github_oidc_subjects[each.key]]
     }
   }
 }
