@@ -10,6 +10,7 @@ variables {
   github_repository        = "ranikun-labs/carelog-be"
   cluster_name             = "dev-shared"
   service_name             = "dev-carelog"
+  ecr_repository_name      = "ranikun/carelog/api"
   workload                 = "carelog"
   tags                     = {}
 }

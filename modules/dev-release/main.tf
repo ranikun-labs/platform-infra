@@ -34,7 +34,7 @@ data "aws_iam_policy_document" "trust" {
   }
 }
 resource "aws_ecr_repository" "service" {
-  name                 = var.service_name
+  name                 = var.ecr_repository_name
   image_tag_mutability = "IMMUTABLE"
   image_scanning_configuration { scan_on_push = true }
   force_delete = false
@@ -120,3 +120,4 @@ output "publisher_role_arn" { value = aws_iam_role.publisher.arn }
 output "deployer_role_arn" { value = aws_iam_role.deployer.arn }
 output "ecs_service_name" { value = var.service_name }
 output "task_family" { value = var.service_name }
+output "ecr_repository_name" { value = aws_ecr_repository.service.name }

@@ -9,8 +9,8 @@ variable "aws_account_id" {
 variable "name_prefix" {
   type = string
   validation {
-    condition     = can(regex("(^|-)dev(-|$)", var.name_prefix))
-    error_message = "name_prefix must contain a hyphen-delimited dev segment."
+    condition     = var.name_prefix == "ranikun-platform-dev"
+    error_message = "name_prefix must be ranikun-platform-dev."
   }
 }
 variable "vpc_id" { type = string }

@@ -35,7 +35,7 @@ variable "tags" {
 variable "name_prefix" {
   type = string
   validation {
-    condition     = can(regex("^[A-Za-z0-9_-]+$", var.name_prefix)) && can(regex("(^|-)dev(-|$)", var.name_prefix))
-    error_message = "Use the existing platform prefix with a hyphen-delimited dev segment."
+    condition     = var.name_prefix == "ranikun-platform-dev"
+    error_message = "Use ranikun-platform-dev as the platform prefix."
   }
 }

@@ -7,7 +7,7 @@ mock_provider "aws" {
 variables {
   aws_region             = "ap-northeast-2"
   aws_account_id         = "111122223333"
-  name_prefix            = "test-dev"
+  name_prefix            = "ranikun-platform-dev"
   vpc_id                 = "vpc-0123456789abcdef0"
   private_subnet_ids     = ["subnet-0123456789abcdef0", "subnet-0123456789abcdef1"]
   public_subnet_ids      = ["subnet-0123456789abcdef2", "subnet-0123456789abcdef3"]
@@ -62,8 +62,8 @@ run "audit_enabled_with_explicit_contract" {
   variables {
     audit_contract = {
       reference           = "test-only-fixture"
-      producer_role_names = ["test-dev-core-task"]
-      consumer_role_name  = "test-dev-audit-task"
+      producer_role_names = ["ranikun-platform-dev-core-task"]
+      consumer_role_name  = "ranikun-platform-dev-audit-task"
       visibility_timeout  = 60
       max_receive_count   = 5
       alarm_actions       = ["arn:aws:sns:ap-northeast-2:111122223333:test-dev-alarms"]

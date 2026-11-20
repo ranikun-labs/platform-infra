@@ -12,7 +12,7 @@ variables {
 run "release_contract" {
   command = plan
   assert {
-    condition     = module.release["finance"].ecs_service_name == "dev-finance"
+    condition     = module.release["finance"].ecs_service_name == "ranikun-finance-dev-api"
     error_message = "The workload must use the service's existing name."
   }
 }
@@ -20,4 +20,12 @@ run "reject_wrong_provider" {
   command = plan
   variables { github_oidc_provider_arn = "arn:aws:iam::999999999999:oidc-provider/token.actions.githubusercontent.com" }
   expect_failures = [var.github_oidc_provider_arn]
+}
+
+run "ecr_name" {
+  command = plan
+  assert {
+    condition = module.release["finance"].ecr_repository_name == "ranikun/finance/api"
+    error_message = "ECR repository name mismatch."
+  }
 }

@@ -6,3 +6,4 @@ variable "cluster_name" { type = string }
 variable "service_name" { type = string }
 variable "tags" { type = map(string) }
 variable "workload" { type = string }
+variable "ecr_repository_name" { type = string }
