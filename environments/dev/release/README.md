@@ -11,3 +11,14 @@ Images have immutable tags and scan on push. No lifecycle policy deletes images:
 Until the separate shared cluster rename is approved and applied, configure DEV_ECS_CLUSTER as dev-shared.
 
 Use each workload output's ECR ARN and a separately verified immutable image digest in its runtime inputs. Configure SCG upstreams for Carelog and Finance as ranikun-carelog-dev-api.dev.internal and ranikun-finance-dev-api.dev.internal using their actual configured service ports.
+
+
+## Exact caller OIDC subjects before release bootstrap
+
+Every root now requires `github_oidc_subjects`, keyed by its workloads (`gateway`/`core`, `carelog`, or `finance`), with exact `publish` and `deploy` values. No value defaults to a derived string. Capture only filtered `sub`, `aud`, issuer, repository IDs, environment and workflow metadata from an authorized diagnostic in each actual caller environment; do not print or store a JWT. A default diagnostic must not publish an image or assume AWS credentials.
+
+Current GitHub repository metadata independently identifies owner `211108135`, Platform repository `1327477262`, Carelog `981081375`, and Finance `1331151117`. The module validates each supplied subject against those immutable IDs, its fixed repository name and exact `dev-<workload>-publish`/`deploy` environment, then uses `StringEquals` for that whole supplied subject. It does not accept a legacy name-only subject, `repo:*`, another product, or an environment swap. If the actual issuer format changes, stop for a separately reviewed contract delta rather than widen trust.
+
+Shared-plan run [44665177083](https://github.com/ranikun-labs/platform-infra/actions/runs/44665177083), attempt 2, actually emitted `repo:ranikun-labs@211108135/platform-infra@1416285118:environment:dev-plan` and authenticated successfully. That observes the shared-plan token only. Application publisher/deployer subjects with analogous ID-bearing prefixes remain inferred until captured from their own caller environments, including when invoking the SHA-pinned reusable workflow. Test fixtures using the expected pattern are not live claim evidence. Repository metadata IDs do not by themselves prove an OIDC `sub` value or an existing IAM policy.
+
+After separate review/merge, plan each release root with confirmed values and existing account/provider/backend ownership. This source change does not modify live IAM trust, create ECR repositories, publish an image, dispatch a workflow or apply Terraform. Publisher-only dispatch after its own prerequisites uses the tested default-branch SHA and `deploy_enabled=false`; Platform uses `deploy=false` with the selected service. First digests seed the initial ECS task definition; the steady-state deploy workflow requires an existing stable service with desired count greater than zero and cannot bootstrap it from zero.

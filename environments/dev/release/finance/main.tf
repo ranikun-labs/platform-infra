@@ -1,15 +1,18 @@
 module "release" {
-  for_each                 = { finance = "ranikun-finance-dev-api" }
-  source                   = "../../../../modules/dev-release"
-  aws_account_id           = var.aws_account_id
-  aws_region               = var.aws_region
-  github_repository        = "ranikun-labs/finance-harness-be"
-  github_oidc_provider_arn = var.github_oidc_provider_arn
-  cluster_name             = var.cluster_name
-  service_name             = each.value
-  ecr_repository_name      = "ranikun/finance/api"
-  workload                 = each.key
-  tags                     = merge(var.tags, { Environment = "dev", Owner = "finance", ManagedBy = "terraform" })
+  for_each                   = { finance = "ranikun-finance-dev-api" }
+  source                     = "../../../../modules/dev-release"
+  aws_account_id             = var.aws_account_id
+  aws_region                 = var.aws_region
+  github_repository          = "ranikun-labs/finance-harness-be"
+  github_repository_owner_id = "211108135"
+  github_repository_id       = "1331151117"
+  github_oidc_subjects       = var.github_oidc_subjects[each.key]
+  github_oidc_provider_arn   = var.github_oidc_provider_arn
+  cluster_name               = var.cluster_name
+  service_name               = each.value
+  ecr_repository_name        = "ranikun/finance/api"
+  workload                   = each.key
+  tags                       = merge(var.tags, { Environment = "dev", Owner = "finance", ManagedBy = "terraform" })
 }
 output "workloads" {
   value = { for name, release in module.release : name => {

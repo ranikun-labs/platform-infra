@@ -4,6 +4,10 @@ mock_provider "aws" {
   }
 }
 variables {
+  # Test-only expected pattern; these are not observed minted application claims.
+  github_oidc_subjects = {
+    carelog = { publish = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-publish", deploy = "repo:ranikun-labs@211108135/carelog-be@981081375:environment:dev-carelog-deploy" }
+  }
   aws_account_id           = "123456789012"
   aws_region               = "us-east-1"
   github_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
