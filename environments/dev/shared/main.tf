@@ -7,7 +7,7 @@ resource "aws_vpc" "shared" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags                 = merge(local.tags, { Name = local.name })
+  tags                 = merge(local.tags, { Name = "ranikun-platform-dev-vpc" })
 }
 resource "aws_internet_gateway" "shared" {
   vpc_id = aws_vpc.shared.id
