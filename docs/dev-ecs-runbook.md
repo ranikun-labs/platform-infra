@@ -28,7 +28,7 @@ GitHub의 기본 검사 workflow는 backend 없이 검사한다. 실제 plan/app
 
 Cloudflare의 원격 관리 Tunnel에 고정 DEV API 호스트명을 등록하고 대상을 `http://localhost:8080`으로 지정한다. 커넥터는 Gateway와 같은 Task에서 Gateway 헬스 체크 성공 후 시작한다. 외부에서 Task에 인바운드 포트를 열지 않는다. Cloudflare로 나갈 TCP 또는 UDP 7844와 ECR·Secrets·Logs 및 제품 OAuth·캐시에 필요한 송신 연결을 실제 Task에서 확인한다.
 
-ALB를 끄려면 Gateway Tunnel 입력이 필요하다. NAT 없는 경로는 각 루트에서 public subnet과 공개 IP를 명시 선택한다. 최초 활성화는 기존 릴리스 경계에서 새 baseline Task revision을 대상으로 진행한다. Tunnel 연결, 같은 호스트명에서 두 제품의 로그인과 저장·재조회, 0→1 재기동을 확인한다.
+ALB를 끄려면 Gateway Tunnel 입력이 필요하다. NAT 없는 경로는 각 루트에서 public subnet과 공개 IP를 명시 선택한다. 새 서비스의 최초 Task는 이전 revision을 지정하지 않으면 Terraform baseline을 사용한다. 기존 서비스에 커넥터를 처음 추가할 때는 현재 revision을 복구용으로 기록하고, 검토한 `gateway_baseline_task_definition_arn`을 승인된 DEV 운영 경로에서 직접 활성화한다. 이미지 릴리스는 활성 revision의 앱 이미지만 바꾸므로 신규 커넥터를 도입할 수 없다. 기존 ALB를 사용 중이면 고정 Tunnel 호스트명과 복구 동작을 검증한 뒤 별도 plan으로 ALB를 제거한다. Tunnel 연결, 같은 호스트명에서 두 제품의 로그인과 저장·재조회, 0→1 재기동을 확인한다.
 
 ## 수동 0→1 검증
 
