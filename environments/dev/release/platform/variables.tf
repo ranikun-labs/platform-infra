@@ -39,3 +39,12 @@ variable "name_prefix" {
     error_message = "Use the existing platform prefix with a hyphen-delimited dev segment."
   }
 }
+
+variable "github_oidc_subjects" {
+  type        = map(object({ publish = string, deploy = string }))
+  description = "Confirmed exact per-environment caller subjects; keys must match this owner's workloads. No fallback to inferred or legacy subjects."
+  validation {
+    condition     = toset(keys(var.github_oidc_subjects)) == toset(["gateway", "core"])
+    error_message = "Supply exact publish/deploy subjects for only: gateway, core."
+  }
+}
