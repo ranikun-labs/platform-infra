@@ -25,7 +25,7 @@ run "reject_wrong_provider" {
 run "ecr_name" {
   command = plan
   assert {
-    condition = module.release["carelog"].ecr_repository_name == "ranikun/carelog/api"
+    condition     = module.release["carelog"].ecr_repository_name == "ranikun/carelog/api"
     error_message = "ECR repository name mismatch."
   }
 }

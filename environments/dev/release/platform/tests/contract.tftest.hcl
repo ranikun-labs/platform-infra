@@ -26,7 +26,7 @@ run "reject_wrong_provider" {
 run "ecr_name_gateway" {
   command = plan
   assert {
-    condition = module.release["gateway"].ecr_repository_name == "ranikun/platform/gateway"
+    condition     = module.release["gateway"].ecr_repository_name == "ranikun/platform/gateway"
     error_message = "The ECR repository name must match the workload contract."
   }
 }
@@ -34,7 +34,7 @@ run "ecr_name_gateway" {
 run "ecr_name_core" {
   command = plan
   assert {
-    condition = module.release["core"].ecr_repository_name == "ranikun/platform/core"
+    condition     = module.release["core"].ecr_repository_name == "ranikun/platform/core"
     error_message = "The ECR repository name must match the workload contract."
   }
 }
