@@ -28,7 +28,7 @@ GitHub의 기본 검사 workflow는 backend 없이 검사한다. 실제 plan/app
 
 Cloudflare의 원격 관리 Tunnel에 고정 DEV API 호스트명을 등록하고 대상을 `http://localhost:8080`으로 지정한다. 커넥터는 Gateway와 같은 Task에서 Gateway 헬스 체크 성공 후 시작한다. 외부에서 Task에 인바운드 포트를 열지 않는다. Cloudflare로 나갈 TCP 또는 UDP 7844와 ECR·Secrets·Logs 및 제품 OAuth·캐시에 필요한 송신 연결을 실제 Task에서 확인한다.
 
-이 선택 입력은 커넥터 컨테이너를 추가한다. ALB 제거와 NAT 없는 서브넷·공개 IP 선택은 별도 네트워크 구성을 적용한 뒤 확인한다. 최초 활성화는 기존 릴리스 경계에서 새 baseline Task revision을 대상으로 진행한다. Tunnel 연결, 같은 호스트명에서 두 제품의 로그인과 저장·재조회, 0→1 재기동을 확인한다.
+ALB를 끄려면 Gateway Tunnel 입력이 필요하다. NAT 없는 경로는 각 루트에서 public subnet과 공개 IP를 명시 선택한다. 최초 활성화는 기존 릴리스 경계에서 새 baseline Task revision을 대상으로 진행한다. Tunnel 연결, 같은 호스트명에서 두 제품의 로그인과 저장·재조회, 0→1 재기동을 확인한다.
 
 ## 수동 0→1 검증
 
@@ -47,7 +47,7 @@ aws ecs wait services-stable --region "$DEV_AWS_REGION" \
   --cluster "$DEV_CLUSTER_ARN" --services "$DEV_SERVICE_NAME"
 ```
 
-Core와 선택한 제품의 내부 상태·DB 접근부터 확인하고, SCG는 Platform의 `gateway_target_group_arn`으로 `aws elbv2 describe-target-health`에서 정상 대상 등록을 확인한다. 이미 활동 중인 공용 서비스는 현재 용량을 유지한다. 외부에서 실제 로그인과 사용자 API가 성공해야 복귀 검증을 완료한다. 시간이 초과되면 ECS 이벤트·중단 이유·CloudWatch 로그·대상 상태를 확인해 승인된 기존 revision 복구 또는 수동 유지로 전환한다. 자동 종료 없이 테스트를 끝내고, 별도 승인된 드레이닝 절차에서만 0으로 내린다.
+Core와 선택한 제품의 내부 상태·DB 접근부터 확인한다. ALB를 쓰는 경우 대상 그룹 상태를 확인하고, Tunnel인 경우 Gateway 컨테이너 헬스 및 Cloudflare Tunnel 연결 상태와 외부 API readiness를 확인한다. 이미 활동 중인 공용 서비스는 현재 용량을 유지한다. 외부에서 실제 로그인과 사용자 API가 성공해야 복귀 검증을 완료한다. 시간이 초과되면 ECS 이벤트·중단 이유·CloudWatch 로그·대상 상태를 확인해 승인된 기존 revision 복구 또는 수동 유지로 전환한다. 자동 종료 없이 테스트를 끝내고, 별도 승인된 드레이닝 절차에서만 0으로 내린다.
 
 ## SQS와 절전 검증
 

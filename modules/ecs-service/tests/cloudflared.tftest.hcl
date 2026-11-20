@@ -39,6 +39,8 @@ run "connector_uses_only_the_tunnel_secret_and_waits_for_gateway" {
   command = plan
 
   variables {
+    assign_public_ip = true
+    target_group_arn = null
     cloudflared = {
       image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
       ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/cloudflared"
@@ -47,7 +49,7 @@ run "connector_uses_only_the_tunnel_secret_and_waits_for_gateway" {
   }
 
   assert {
-    condition = alltrue([
+    condition = aws_ecs_service.service.network_configuration[0].assign_public_ip && tolist(aws_ecs_service.service.network_configuration[0].subnets) == tolist(var.private_subnet_ids) && length(aws_ecs_service.service.load_balancer) == 0 && alltrue([
       for c in jsondecode(aws_ecs_task_definition.baseline.container_definitions) :
       c.name != "cloudflared" ? length(c.secrets) == 0 : (
         c.essential &&

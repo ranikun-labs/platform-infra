@@ -79,11 +79,27 @@ run "audit_enabled_with_explicit_contract" {
 run "tunnel_no_alb_public_egress" {
   command = plan
   variables {
-    enable_alb         = false
-    workload_public_ip = true
+    enable_alb             = false
+    workload_public_ip     = true
+    certificate_arn        = null
+    alb_ingress_cidrs      = []
+    gateway_readiness_path = null
+    gateway_cloudflared = {
+      image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/cloudflared"
+      token_secret_arn   = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:test-tunnel-abcdef"
+    }
   }
   assert {
-    condition     = length(aws_lb.gateway) == 0 && module.gateway.service_name != null
+    condition     = length(aws_lb.gateway) == 0 && length(aws_vpc_security_group_ingress_rule.gateway_alb) == 0 && module.gateway.service_name != null
     error_message = "No ALB may exist in the public egress tunnel mode."
   }
+}
+
+run "no_alb_requires_connector" {
+  command = plan
+  variables {
+    enable_alb = false
+  }
+  expect_failures = [var.gateway_cloudflared]
 }

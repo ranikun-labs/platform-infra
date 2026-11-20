@@ -47,8 +47,9 @@ resource "aws_lb_target_group" "gateway" {
 variable "gateway_readiness_path" {
   type        = string
   description = "Verified Gateway readiness path on management port 9091."
+  default     = null
   validation {
-    condition     = startswith(var.gateway_readiness_path, "/")
+    condition     = !var.enable_alb || (var.gateway_readiness_path == null ? false : startswith(var.gateway_readiness_path, "/"))
     error_message = "Gateway readiness path must be absolute."
   }
 }
@@ -68,4 +69,22 @@ resource "aws_lb_listener" "https" {
 
 output "gateway_target_group_arn" {
   value = var.enable_alb ? aws_lb_target_group.gateway[0].arn : null
+}
+
+
+moved {
+  from = aws_security_group.alb
+  to   = aws_security_group.alb[0]
+}
+moved {
+  from = aws_lb.gateway
+  to   = aws_lb.gateway[0]
+}
+moved {
+  from = aws_lb_target_group.gateway
+  to   = aws_lb_target_group.gateway[0]
+}
+moved {
+  from = aws_lb_listener.https
+  to   = aws_lb_listener.https[0]
 }

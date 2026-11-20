@@ -6,4 +6,8 @@ variable "gateway_cloudflared" {
     token_secret_arn   = string
   })
   default = null
+  validation {
+    condition     = var.enable_alb || var.gateway_cloudflared != null
+    error_message = "A Tunnel connector is required when ALB is disabled."
+  }
 }
