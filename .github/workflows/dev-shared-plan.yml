@@ -90,6 +90,11 @@ jobs:
             exit 1
           fi
           terraform show -json "$plan" | jq -r '
-            [.resource_changes[]?.change.actions | join(",")] |
-            "Resource actions: " + ((group_by(.) | map("\(.[0])=\(length)") | join(", ")) // "none")
+            [.resource_changes[]? | {
+              address: (.address | if contains("[\"") then split("[\"")[0] + "[key omitted]" else . end),
+              type: .type,
+              action: (.change.actions | join(" -> "))
+            }] |
+            (.[] | "\(.address) | \(.type) | \(.action)"),
+            ("Resource actions: " + (group_by(.action) | map("\(.[0].action)=\(length)") | join(", ")))
           '
