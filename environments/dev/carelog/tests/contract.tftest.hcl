@@ -14,6 +14,7 @@ variables {
     namespace_id       = "ns-0123456789abcdef0"
   }
   gateway_security_group_id = "sg-0123456789abcdef0"
+  core_security_group_id    = "sg-0123456789abcdef1"
   runtime = {
     container_port         = 8080
     image                  = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -35,5 +36,19 @@ run "gateway_only_service_ingress" {
   assert {
     condition     = aws_vpc_security_group_ingress_rule.gateway.referenced_security_group_id == var.gateway_security_group_id && aws_vpc_security_group_ingress_rule.gateway.from_port == var.runtime.container_port && var.runtime.initial_desired_count == 0
     error_message = "Only SCG should be able to reach the private product port, with a zero-task bootstrap."
+  }
+}
+
+run "preserves_existing_core_claims_rule_and_defaults" {
+  command = plan
+
+  assert {
+    condition     = aws_vpc_security_group_ingress_rule.core_claims.referenced_security_group_id == var.core_security_group_id && aws_vpc_security_group_ingress_rule.core_claims.from_port == var.runtime.container_port
+    error_message = "The existing Core-to-Carelog claims rule must stay declared so a plan does not delete it."
+  }
+
+  assert {
+    condition     = var.preserve.assign_public_ip == false && var.preserve.service_discovery_custom_health_check == false
+    error_message = "Preservation inputs must default to the previous module behavior."
   }
 }

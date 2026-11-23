@@ -31,6 +31,8 @@ variable "runtime" {
     execution_kms_key_arns    = set(string)
     app_policy_json           = optional(string)
     first_task_definition_arn = optional(string)
+    additional_volume_names   = optional(set(string), [])
+    app_mount_points          = optional(list(object({ sourceVolume = string, containerPath = string, readOnly = bool })), [])
     health_check = object({
       command      = list(string)
       interval     = number
@@ -43,6 +45,18 @@ variable "runtime" {
 }
 variable "tags" {
   type    = map(string)
+  default = {}
+}
+
+# Preserve settings of the already-deployed service. Defaults reproduce the module's previous behavior.
+variable "preserve" {
+  type = object({
+    assign_public_ip                      = optional(bool, false)
+    execution_permissions_boundary_arn    = optional(string)
+    task_permissions_boundary_arn         = optional(string)
+    assume_role_source_conditions         = optional(bool, false)
+    service_discovery_custom_health_check = optional(bool, false)
+  })
   default = {}
 }
 
@@ -72,4 +86,9 @@ variable "enrollment_core_security_group_id" {
   description = "Core security group allowed to the enrollment TLS port; null disables rule."
   type        = string
   default     = null
+}
+
+variable "core_security_group_id" {
+  description = "Platform Core security group allowed to the Carelog app port (identity claims rule that already exists in DEV)."
+  type        = string
 }

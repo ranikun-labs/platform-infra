@@ -61,6 +61,39 @@ variable "tags" {
   default = {}
 }
 
+variable "gateway_public_alb_enabled" {
+  description = "When false, the public ALB, its target group, listener and related SG rules are not created (live DEV has none)."
+  type        = bool
+  default     = true
+}
+variable "gateway_additional_containers" {
+  description = "Raw ECS container definitions added beside the Gateway application container (for example cloudflared sidecars)."
+  type        = any
+  default     = []
+}
+variable "gateway_preserve" {
+  description = "Preserved settings of the already-deployed Gateway service; defaults reproduce the previous behavior."
+  type = object({
+    assign_public_ip                      = optional(bool, false)
+    execution_permissions_boundary_arn    = optional(string)
+    task_permissions_boundary_arn         = optional(string)
+    assume_role_source_conditions         = optional(bool, false)
+    service_discovery_custom_health_check = optional(bool, false)
+  })
+  default = {}
+}
+variable "core_preserve" {
+  description = "Preserved settings of the already-deployed Core service; defaults reproduce the previous behavior."
+  type = object({
+    assign_public_ip                      = optional(bool, false)
+    execution_permissions_boundary_arn    = optional(string)
+    task_permissions_boundary_arn         = optional(string)
+    assume_role_source_conditions         = optional(bool, false)
+    service_discovery_custom_health_check = optional(bool, false)
+  })
+  default = {}
+}
+
 variable "enrollment_tls_candidate" {
   description = "Disabled by default; supply only after TLS and route allowlist verification."
   type = object({

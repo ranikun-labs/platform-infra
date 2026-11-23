@@ -48,13 +48,38 @@ variable "health_check_grace_period_seconds" {
   default = 60
 }
 
+# Preservation options. Defaults reproduce the previous module behavior.
+variable "assign_public_ip" {
+  description = "Fargate public IP for tasks; required when the subnets have no NAT or VPC endpoints for image pulls."
+  type        = bool
+  default     = false
+}
+variable "execution_permissions_boundary_arn" {
+  type    = string
+  default = null
+}
+variable "task_permissions_boundary_arn" {
+  type    = string
+  default = null
+}
+variable "assume_role_source_conditions" {
+  description = "Add aws:SourceAccount and aws:SourceArn (ECS) conditions to the task role trust policies."
+  type        = bool
+  default     = false
+}
+variable "service_discovery_custom_health_check" {
+  description = "Declare health_check_custom_config on the Cloud Map service. Changing it replaces the service."
+  type        = bool
+  default     = false
+}
 variable "additional_volume_names" {
   type    = set(string)
   default = []
 }
 variable "additional_containers" {
-  type    = any
-  default = []
+  description = "Raw ECS container definitions added beside the application container (for example sidecars)."
+  type        = any
+  default     = []
 }
 variable "app_mount_points" {
   type    = list(object({ sourceVolume = string, containerPath = string, readOnly = bool }))
@@ -64,7 +89,6 @@ variable "app_container_dependencies" {
   type    = list(object({ containerName = string, condition = string }))
   default = []
 }
-
 variable "additional_ecr_repository_arns" {
   type    = set(string)
   default = []

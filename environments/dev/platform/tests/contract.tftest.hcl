@@ -47,7 +47,7 @@ run "https_ingress_and_audit_disabled" {
   command = plan
 
   assert {
-    condition     = aws_lb_listener.https.protocol == "HTTPS" && aws_lb_target_group.gateway.target_type == "ip" && aws_lb_target_group.gateway.health_check[0].port == "9091"
+    condition     = aws_lb_listener.https[0].protocol == "HTTPS" && aws_lb_target_group.gateway[0].target_type == "ip" && aws_lb_target_group.gateway[0].health_check[0].port == "9091"
     error_message = "HTTPS must target SCG through its IP target group and separate readiness port."
   }
   assert {

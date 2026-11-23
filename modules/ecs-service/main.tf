@@ -1,9 +1,26 @@
+data "aws_caller_identity" "current" {}
 data "aws_iam_policy_document" "assume" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
       type        = "Service"
       identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+    dynamic "condition" {
+      for_each = var.assume_role_source_conditions ? [1] : []
+      content {
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+    }
+    dynamic "condition" {
+      for_each = var.assume_role_source_conditions ? [1] : []
+      content {
+        test     = "ArnLike"
+        variable = "aws:SourceArn"
+        values   = ["arn:aws:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:*"]
+      }
     }
   }
 }
@@ -13,14 +30,16 @@ resource "aws_cloudwatch_log_group" "service" {
   tags              = var.tags
 }
 resource "aws_iam_role" "execution" {
-  name               = "${var.name}-execution"
-  assume_role_policy = data.aws_iam_policy_document.assume.json
-  tags               = var.tags
+  name                 = "${var.name}-execution"
+  assume_role_policy   = data.aws_iam_policy_document.assume.json
+  permissions_boundary = var.execution_permissions_boundary_arn
+  tags                 = var.tags
 }
 resource "aws_iam_role" "app" {
-  name               = "${var.name}-task"
-  assume_role_policy = data.aws_iam_policy_document.assume.json
-  tags               = var.tags
+  name                 = "${var.name}-task"
+  assume_role_policy   = data.aws_iam_policy_document.assume.json
+  permissions_boundary = var.task_permissions_boundary_arn
+  tags                 = var.tags
 }
 data "aws_iam_policy_document" "execution" {
   statement {
@@ -81,7 +100,10 @@ resource "aws_service_discovery_service" "service" {
     }
     routing_policy = "MULTIVALUE"
   }
-  health_check_custom_config {}
+  dynamic "health_check_custom_config" {
+    for_each = var.service_discovery_custom_health_check ? [1] : []
+    content {}
+  }
   tags = var.tags
 }
 resource "aws_ecs_task_definition" "baseline" {
@@ -104,8 +126,6 @@ resource "aws_ecs_task_definition" "baseline" {
     essential        = true
     stopTimeout      = 120
     portMappings     = var.app_port_mappings == null ? [{ containerPort = var.container_port, protocol = "tcp" }] : var.app_port_mappings
-    mountPoints      = var.app_mount_points
-    dependsOn        = var.app_container_dependencies
     environment      = [for key in sort(keys(var.environment)) : { name = key, value = var.environment[key] }]
     secrets          = [for key in sort(keys(var.secrets)) : { name = key, valueFrom = var.secrets[key] }]
     healthCheck      = { command = var.health_check.command, interval = var.health_check.interval, timeout = var.health_check.timeout, retries = var.health_check.retries, startPeriod = var.health_check.start_period }
@@ -129,7 +149,7 @@ resource "aws_ecs_service" "service" {
   network_configuration {
     subnets          = var.private_subnet_ids
     security_groups  = [aws_security_group.service.id]
-    assign_public_ip = false
+    assign_public_ip = var.assign_public_ip
   }
   service_registries { registry_arn = aws_service_discovery_service.service.arn }
   dynamic "load_balancer" {
