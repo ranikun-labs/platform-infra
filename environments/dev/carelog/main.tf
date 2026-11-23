@@ -17,8 +17,8 @@ module "service" {
   memory                     = var.runtime.memory
   desired_count              = var.runtime.initial_desired_count
   environment                = var.runtime.environment
-  secrets                    = var.runtime.secrets
-  execution_secret_arns      = var.runtime.execution_secret_arns
+  secrets                    = merge(var.runtime.secrets, var.enrollment_secret_arn == null ? {} : { CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET = var.enrollment_secret_arn })
+  execution_secret_arns      = setunion(var.runtime.execution_secret_arns, var.enrollment_secret_arn == null ? toset([]) : toset([var.enrollment_secret_arn]))
   execution_kms_key_arns     = var.runtime.execution_kms_key_arns
   app_policy_json            = var.runtime.app_policy_json
   first_task_definition_arn  = var.runtime.first_task_definition_arn
@@ -33,4 +33,14 @@ resource "aws_vpc_security_group_ingress_rule" "gateway" {
   from_port                    = var.runtime.container_port
   to_port                      = var.runtime.container_port
   description                  = "Gateway to carelog"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "core_enrollment_tls" {
+  count                        = var.enrollment_core_security_group_id == null ? 0 : 1
+  security_group_id            = module.service.security_group_id
+  referenced_security_group_id = var.enrollment_core_security_group_id
+  ip_protocol                  = "tcp"
+  from_port                    = 8443
+  to_port                      = 8443
+  description                  = "Core to Carelog private enrollment TLS"
 }

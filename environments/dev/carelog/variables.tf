@@ -56,3 +56,15 @@ variable "enrollment_tls_candidate" {
   })
   default = { volume_names = [], containers = [], app_mount_points = [], app_dependencies = [] }
 }
+
+variable "enrollment_secret_arn" {
+  description = "Existing enrollment bearer Secret ARN; null leaves enrollment disabled."
+  type        = string
+  default     = null
+}
+
+variable "enrollment_core_security_group_id" {
+  description = "Core security group allowed to the enrollment TLS port; null disables rule."
+  type        = string
+  default     = null
+}

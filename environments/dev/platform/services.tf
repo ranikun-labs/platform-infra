@@ -77,8 +77,8 @@ module "core" {
   desired_count              = var.core_desired_count
   first_task_definition_arn  = var.core_first_task_definition_arn
   environment                = merge(var.core_runtime.environment, { PLATFORM_CORE_PORT = "8081" })
-  secrets                    = var.core_runtime.secrets
-  execution_secret_arns      = var.core_runtime.execution_secret_arns
+  secrets                    = merge(var.core_runtime.secrets, var.enrollment_secret_arn == null ? {} : { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL = var.enrollment_secret_arn })
+  execution_secret_arns      = setunion(var.core_runtime.execution_secret_arns, var.enrollment_secret_arn == null ? toset([]) : toset([var.enrollment_secret_arn]))
   execution_kms_key_arns     = var.core_runtime.execution_kms_key_arns
   health_check               = var.core_runtime.health_check
   log_retention_days         = var.core_runtime.log_retention_days

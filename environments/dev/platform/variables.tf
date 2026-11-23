@@ -71,3 +71,9 @@ variable "enrollment_tls_candidate" {
   })
   default = { volume_names = [], containers = [], app_mount_points = [], app_dependencies = [] }
 }
+
+variable "enrollment_secret_arn" {
+  description = "Existing enrollment bearer Secret ARN; null leaves enrollment disabled."
+  type        = string
+  default     = null
+}
