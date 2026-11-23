@@ -14,3 +14,27 @@ Security status: the proxy currently denies every request on external port 8080 
 Current candidate routing supersedes the earlier deny-all paragraph: 8080 permits `/api/v1/users/customers`, `/api/v1/customer-events`, and `/api/v1/internal/identity/claims` with segment boundaries, and rejects other paths. 8443 permits only the single-account enrollment path. The allowlist derives from e1f994c2 controller source and is incomplete for other existing APIs. It is not approved for deployment. Normalization, encoded-path and integration tests remain mandatory.
 
 External review request: review this commit and the Carelog #61 e1f994c2 integration for 8080 bypass, Spring/nginx URL normalization, API compatibility, Fargate metadata address discovery, same-task bind behavior, IAM least privilege, digest pinning, task startup dependencies, truststore parity, certificate rotation and Terraform plan. Report APPROVE or findings and exact reviewed SHA. Do not apply or merge.
+
+## Reproduction and observed result
+
+On 2026-11-23 the following local-only stub test passed. It generates a disposable CA and keypair inside the container. No real credentials are read.
+
+```powershell
+docker build -t carelog-dev-tls-candidate:local candidates/carelog-tls
+$testScript = (Resolve-Path candidates/carelog-tls/test-proxy.sh).Path
+docker run --rm --entrypoint sh -v "${testScript}:/tmp/test-proxy.sh:ro" carelog-dev-tls-candidate:local /tmp/test-proxy.sh
+```
+
+Customers, customer-events and claims reached the static backend stub (404), enrollment requests to 8080 and selected normalized/encoded bypass variants returned 403, and an enrollment request to 8443 reached the stub over TLS (404). Incorrect CA and wrong hostname failed TLS verification. This does not execute the Carelog API, the JDK client, ECS networking, an exhaustive path-bypass suite, or the certificate delivery and rotation mechanism. The test downloads apk packages and uses a local Docker runtime.
+
+## Real DEV plan prerequisites
+
+Use the existing protected DEV `terraform.tfvars` values, state backend bucket and AWS profile. Do not print tfvars or state because they may contain sensitive material. The repository operator workflow documents required inputs. Run backend initialization against the existing correct state before a read-only plan, for each of `environments/dev/platform` and `environments/dev/carelog`. For example, from the chosen environment, with protected tfvars already provisioned:
+
+```powershell
+$env:AWS_PROFILE = 'rankun-admin'
+terraform init -input=false -backend-config='bucket=ranikun-dev-tfstate-124495093425' -backend-config='region=ap-northeast-2' -backend-config='allowed_account_ids=["124495093425"]'
+terraform plan -input=false -lock-timeout=5m -var-file='<protected-tfvars>' -out='<secure-plan-path>'
+```
+
+A real DEV plan has not been run. Backend key and complete variable inputs must be independently matched to the intended environment before planning. Plan files can contain sensitive data and require protected storage. The latest candidate commit is for review and cannot be deployed without resolving the preceding gaps.
