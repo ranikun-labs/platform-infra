@@ -1,28 +1,98 @@
 {
   "carelogTaskFragment": {
-    "volumes": [{"name":"carelog-tls"}],
-    "containerDefinitions": [{
-      "name":"carelog-tls-proxy",
-      "image":"REPLACE_WITH_PRIVATE_ECR_IMAGE_DIGEST",
-      "essential":true,
-      "portMappings":[{"containerPort":8443,"protocol":"tcp"}],
-      "mountPoints":[{"sourceVolume":"carelog-tls","containerPath":"/run/carelog-tls","readOnly":false}],
-      "secrets":[{"name":"TLS_CERT_PEM","valueFrom":"REPLACE_WITH_CERT_SECRET_ARN"},{"name":"TLS_KEY_PEM","valueFrom":"REPLACE_WITH_PRIVATE_KEY_SECRET_ARN"}]
-    }]
+    "volumes": [
+      {
+        "name": "carelog-tls"
+      }
+    ],
+    "containerDefinitions": [
+      {
+        "name": "carelog-tls-proxy",
+        "image": "REPLACE_WITH_PRIVATE_ECR_IMAGE_DIGEST",
+        "essential": true,
+        "portMappings": [
+          {
+            "protocol": "tcp",
+            "containerPort": 8080
+          },
+          {
+            "protocol": "tcp",
+            "containerPort": 8443
+          }
+        ],
+        "mountPoints": [
+          {
+            "sourceVolume": "carelog-tls",
+            "containerPath": "/run/carelog-tls",
+            "readOnly": false
+          }
+        ],
+        "secrets": [
+          {
+            "name": "TLS_CERT_PEM",
+            "valueFrom": "REPLACE_WITH_CERT_SECRET_ARN"
+          },
+          {
+            "name": "TLS_KEY_PEM",
+            "valueFrom": "REPLACE_WITH_PRIVATE_KEY_SECRET_ARN"
+          }
+        ]
+      }
+    ],
+    "appContainerAddition": {
+      "portMappings": [],
+      "environment": [
+        {
+          "value": "127.0.0.1",
+          "name": "SERVER_ADDRESS"
+        }
+      ]
+    }
   },
   "coreTaskFragment": {
-    "volumes":[{"name":"carelog-trust"}],
-    "initContainer":{
-      "name":"carelog-trust-init",
-      "image":"REPLACE_WITH_CORE_IMAGE_DIGEST_AND_INIT_SCRIPT",
-      "essential":false,
-      "mountPoints":[{"sourceVolume":"carelog-trust","containerPath":"/run/carelog-trust","readOnly":false}],
-      "secrets":[{"name":"CARELOG_CA_PEM","valueFrom":"REPLACE_WITH_CA_SECRET_ARN"}]
+    "volumes": [
+      {
+        "name": "carelog-trust"
+      }
+    ],
+    "initContainer": {
+      "name": "carelog-trust-init",
+      "image": "REPLACE_WITH_TRUST_INIT_IMAGE_BUILT_FROM_CORE_DIGEST",
+      "essential": false,
+      "mountPoints": [
+        {
+          "sourceVolume": "carelog-trust",
+          "containerPath": "/run/carelog-trust",
+          "readOnly": false
+        }
+      ],
+      "secrets": [
+        {
+          "name": "CARELOG_CA_PEM",
+          "valueFrom": "REPLACE_WITH_CA_SECRET_ARN"
+        }
+      ]
     },
-    "coreContainerAddition":{
-      "dependsOn":[{"containerName":"carelog-trust-init","condition":"SUCCESS"}],
-      "mountPoints":[{"sourceVolume":"carelog-trust","containerPath":"/run/carelog-trust","readOnly":true}],
-      "environment":[{"name":"JAVA_TOOL_OPTIONS","value":"-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"}]
+    "coreContainerAddition": {
+      "dependsOn": [
+        {
+          "containerName": "carelog-trust-init",
+          "condition": "SUCCESS"
+        }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "carelog-trust",
+          "containerPath": "/run/carelog-trust",
+          "readOnly": true
+        }
+      ],
+      "environment": [
+        {
+          "name": "JAVA_TOOL_OPTIONS",
+          "value": "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+        }
+      ]
     }
   }
 }

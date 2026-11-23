@@ -29,7 +29,7 @@ data "aws_iam_policy_document" "execution" {
   }
   statement {
     actions   = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
-    resources = [var.ecr_repository_arn]
+    resources = tolist(setunion(toset([var.ecr_repository_arn]), var.additional_ecr_repository_arns))
   }
   statement {
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
@@ -103,7 +103,7 @@ resource "aws_ecs_task_definition" "baseline" {
     image            = var.image
     essential        = true
     stopTimeout      = 120
-    portMappings     = [{ containerPort = var.container_port, protocol = "tcp" }]
+    portMappings     = var.app_port_mappings == null ? [{ containerPort = var.container_port, protocol = "tcp" }] : var.app_port_mappings
     mountPoints      = var.app_mount_points
     dependsOn        = var.app_container_dependencies
     environment      = [for key in sort(keys(var.environment)) : { name = key, value = var.environment[key] }]

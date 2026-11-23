@@ -38,3 +38,13 @@ terraform plan -input=false -lock-timeout=5m -var-file='<protected-tfvars>' -out
 ```
 
 A real DEV plan has not been run. Backend key and complete variable inputs must be independently matched to the intended environment before planning. Plan files can contain sensitive data and require protected storage. The latest candidate commit is for review and cannot be deployed without resolving the preceding gaps.
+
+## Binding, least-privilege and release-path update
+
+The Carelog input example binds Spring to `127.0.0.1`, removes the app container port mapping, and assigns the nginx sidecar task-IP ports 8080 and 8443. Separate optional sets extend only the execution role ECR repository, Secrets Manager ARN and KMS key ARN scopes. Defaults remain empty. Secret values must never be supplied as Terraform inputs. Core init must be built FROM the exact Core image digest and mount its derived trust store read-only into the Core application, with SUCCESS dependency. The example trustStore password is the default public JDK store integrity password, not an enrollment credential.
+
+On 2026-11-23 a local trust-init image built from Core digest sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf copied the source cacerts and imported a synthetic CA successfully. The source had 117 entries and the result had 118, including the synthetic CA. This verifies init execution and store preservation, not a Core JDK HTTPS handshake or application registration. Windows CRLF originally caused init failure; `.gitattributes` now forces LF on scripts.
+
+The release workflow obtains the current service task definition, replaces only the workload image, and registers a new revision. Terraform baseline changes do not automatically modify the service task revision because task_definition is ignored. A reviewed service revision containing the new sidecar, init container, volumes and settings must be registered and selected through an authorized rollout before an image-only release can inherit them. No revision was registered or selected during this candidate work.
+
+Carelog baseline vs candidate plans with reconstructed state inputs both reported 9 additions, 0 changes, and 10 deletions. This is a diagnostic of existing configuration drift, not approved inputs or an applyable plan. Platform plan remains blocked by missing protected inputs and absent ACM certificate.

@@ -49,10 +49,15 @@ variable "tags" {
 variable "enrollment_tls_candidate" {
   description = "Disabled by default; supply only after TLS and route allowlist verification."
   type = object({
-    volume_names     = set(string)
-    containers       = any
-    app_mount_points = list(object({ sourceVolume = string, containerPath = string, readOnly = bool }))
-    app_dependencies = list(object({ containerName = string, condition = string }))
+    volume_names        = set(string)
+    containers          = any
+    app_mount_points    = list(object({ sourceVolume = string, containerPath = string, readOnly = bool }))
+    app_dependencies    = list(object({ containerName = string, condition = string }))
+    ecr_repository_arns = optional(set(string), [])
+    secret_arns         = optional(set(string), [])
+    kms_key_arns        = optional(set(string), [])
+    environment         = optional(map(string), {})
+    app_port_mappings   = optional(list(object({ containerPort = number, protocol = string })))
   })
   default = { volume_names = [], containers = [], app_mount_points = [], app_dependencies = [] }
 }

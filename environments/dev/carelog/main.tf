@@ -1,30 +1,32 @@
 module "service" {
-  additional_volume_names    = var.enrollment_tls_candidate.volume_names
-  additional_containers      = var.enrollment_tls_candidate.containers
-  app_mount_points           = var.enrollment_tls_candidate.app_mount_points
-  app_container_dependencies = var.enrollment_tls_candidate.app_dependencies
-  source                     = "../../../modules/ecs-service"
-  region                     = var.region
-  name                       = "dev-carelog"
-  cluster_arn                = var.shared.cluster_arn
-  vpc_id                     = var.shared.vpc_id
-  private_subnet_ids         = var.shared.private_subnet_ids
-  namespace_id               = var.shared.namespace_id
-  image                      = var.runtime.image
-  ecr_repository_arn         = var.runtime.ecr_repository_arn
-  container_port             = var.runtime.container_port
-  cpu                        = var.runtime.cpu
-  memory                     = var.runtime.memory
-  desired_count              = var.runtime.initial_desired_count
-  environment                = var.runtime.environment
-  secrets                    = merge(var.runtime.secrets, var.enrollment_secret_arn == null ? {} : { CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET = var.enrollment_secret_arn })
-  execution_secret_arns      = setunion(var.runtime.execution_secret_arns, var.enrollment_secret_arn == null ? toset([]) : toset([var.enrollment_secret_arn]))
-  execution_kms_key_arns     = var.runtime.execution_kms_key_arns
-  app_policy_json            = var.runtime.app_policy_json
-  first_task_definition_arn  = var.runtime.first_task_definition_arn
-  health_check               = var.runtime.health_check
-  log_retention_days         = var.runtime.log_retention_days
-  tags                       = var.tags
+  additional_ecr_repository_arns = var.enrollment_tls_candidate.ecr_repository_arns
+  app_port_mappings              = var.enrollment_tls_candidate.app_port_mappings
+  additional_volume_names        = var.enrollment_tls_candidate.volume_names
+  additional_containers          = var.enrollment_tls_candidate.containers
+  app_mount_points               = var.enrollment_tls_candidate.app_mount_points
+  app_container_dependencies     = var.enrollment_tls_candidate.app_dependencies
+  source                         = "../../../modules/ecs-service"
+  region                         = var.region
+  name                           = "dev-carelog"
+  cluster_arn                    = var.shared.cluster_arn
+  vpc_id                         = var.shared.vpc_id
+  private_subnet_ids             = var.shared.private_subnet_ids
+  namespace_id                   = var.shared.namespace_id
+  image                          = var.runtime.image
+  ecr_repository_arn             = var.runtime.ecr_repository_arn
+  container_port                 = var.runtime.container_port
+  cpu                            = var.runtime.cpu
+  memory                         = var.runtime.memory
+  desired_count                  = var.runtime.initial_desired_count
+  environment                    = merge(var.runtime.environment, var.enrollment_tls_candidate.environment)
+  secrets                        = merge(var.runtime.secrets, var.enrollment_secret_arn == null ? {} : { CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET = var.enrollment_secret_arn })
+  execution_secret_arns          = setunion(var.runtime.execution_secret_arns, var.enrollment_tls_candidate.secret_arns, var.enrollment_secret_arn == null ? toset([]) : toset([var.enrollment_secret_arn]))
+  execution_kms_key_arns         = setunion(var.runtime.execution_kms_key_arns, var.enrollment_tls_candidate.kms_key_arns)
+  app_policy_json                = var.runtime.app_policy_json
+  first_task_definition_arn      = var.runtime.first_task_definition_arn
+  health_check                   = var.runtime.health_check
+  log_retention_days             = var.runtime.log_retention_days
+  tags                           = var.tags
 }
 resource "aws_vpc_security_group_ingress_rule" "gateway" {
   security_group_id            = module.service.security_group_id

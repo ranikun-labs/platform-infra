@@ -64,3 +64,12 @@ variable "app_container_dependencies" {
   type    = list(object({ containerName = string, condition = string }))
   default = []
 }
+
+variable "additional_ecr_repository_arns" {
+  type    = set(string)
+  default = []
+}
+variable "app_port_mappings" {
+  type    = list(object({ containerPort = number, protocol = string }))
+  default = null
+}

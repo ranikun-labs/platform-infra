@@ -1,0 +1,25 @@
+# REVIEW CANDIDATE ONLY. Replace all placeholders with reviewed ARNs and image digests.
+# Carelog root: merge into a protected input file. The main container keeps localhost:8080.
+enrollment_secret_arn = "REPLACE_WITH_ENROLLMENT_SECRET_ARN"
+enrollment_core_security_group_id = "REPLACE_WITH_CORE_SECURITY_GROUP_ID"
+enrollment_tls_candidate = {
+  volume_names = ["carelog-tls"]
+  app_port_mappings = []
+  environment = {
+    SERVER_ADDRESS = "127.0.0.1"
+    CARELOG_IDENTITY_ENROLLMENT_ENABLED = "true"
+  }
+  app_mount_points = []
+  app_dependencies = []
+  ecr_repository_arns = ["REPLACE_WITH_PROXY_ECR_REPOSITORY_ARN"]
+  secret_arns = ["REPLACE_WITH_CERT_SECRET_ARN", "REPLACE_WITH_KEY_SECRET_ARN"]
+  kms_key_arns = [] # Add only applicable customer-managed KMS key ARNs.
+  containers = [{
+    name = "carelog-tls-proxy"
+    image = "REPLACE_WITH_PROXY_IMAGE_BY_SHA256"
+    essential = true
+    portMappings = [{ containerPort = 8080, protocol = "tcp" }, { containerPort = 8443, protocol = "tcp" }]
+    mountPoints = [{ sourceVolume = "carelog-tls", containerPath = "/run/carelog-tls", readOnly = false }]
+    secrets = [{ name = "TLS_CERT_PEM", valueFrom = "REPLACE_WITH_CERT_SECRET_ARN" }, { name = "TLS_KEY_PEM", valueFrom = "REPLACE_WITH_KEY_SECRET_ARN" }]
+  }]
+}

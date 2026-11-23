@@ -1,0 +1,24 @@
+# REVIEW CANDIDATE ONLY. Replace all placeholders with reviewed ARNs and image digests.
+enrollment_secret_arn = "REPLACE_WITH_ENROLLMENT_SECRET_ARN"
+enrollment_tls_candidate = {
+  volume_names = ["carelog-trust"]
+  environment = {
+    SPRING_PROFILES_ACTIVE = "dev"
+    PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+    PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+    PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL = "https://ranikun-carelog-dev-api.dev.internal:8443"
+    JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+  }
+  app_mount_points = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
+  app_dependencies = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
+  ecr_repository_arns = ["REPLACE_WITH_INIT_ECR_REPOSITORY_ARN"]
+  secret_arns = ["REPLACE_WITH_CA_SECRET_ARN"]
+  kms_key_arns = [] # Add only applicable customer-managed KMS key ARNs.
+  containers = [{
+    name = "carelog-trust-init"
+    image = "REPLACE_WITH_INIT_IMAGE_BY_SHA256"
+    essential = false
+    mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }]
+    secrets = [{ name = "CARELOG_CA_PEM", valueFrom = "REPLACE_WITH_CA_SECRET_ARN" }]
+  }]
+}
