@@ -60,3 +60,14 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+
+variable "enrollment_tls_candidate" {
+  description = "Disabled by default; supply only after TLS and route allowlist verification."
+  type = object({
+    volume_names     = set(string)
+    containers       = any
+    app_mount_points = list(object({ sourceVolume = string, containerPath = string, readOnly = bool }))
+    app_dependencies = list(object({ containerName = string, condition = string }))
+  })
+  default = { volume_names = [], containers = [], app_mount_points = [], app_dependencies = [] }
+}

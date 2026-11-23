@@ -94,17 +94,23 @@ resource "aws_ecs_task_definition" "baseline" {
   task_role_arn            = aws_iam_role.app.arn
   skip_destroy             = true
   lifecycle { create_before_destroy = true }
-  container_definitions = jsonencode([{
+  dynamic "volume" {
+    for_each = var.additional_volume_names
+    content { name = volume.value }
+  }
+  container_definitions = jsonencode(concat([merge({
     name             = var.name
     image            = var.image
     essential        = true
     stopTimeout      = 120
     portMappings     = [{ containerPort = var.container_port, protocol = "tcp" }]
+    mountPoints      = var.app_mount_points
+    dependsOn        = var.app_container_dependencies
     environment      = [for key in sort(keys(var.environment)) : { name = key, value = var.environment[key] }]
     secrets          = [for key in sort(keys(var.secrets)) : { name = key, valueFrom = var.secrets[key] }]
     healthCheck      = { command = var.health_check.command, interval = var.health_check.interval, timeout = var.health_check.timeout, retries = var.health_check.retries, startPeriod = var.health_check.start_period }
     logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.service.name, awslogs-region = var.region, awslogs-stream-prefix = "app" } }
-  }])
+  }, length(var.app_mount_points) > 0 ? { mountPoints = var.app_mount_points } : {}, length(var.app_container_dependencies) > 0 ? { dependsOn = var.app_container_dependencies } : {})], var.additional_containers))
   tags = var.tags
 }
 resource "aws_ecs_service" "service" {

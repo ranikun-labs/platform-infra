@@ -58,27 +58,31 @@ module "gateway" {
   depends_on             = [aws_lb_listener.https]
 }
 module "core" {
-  source                    = "../../../modules/ecs-service"
-  region                    = var.aws_region
-  name                      = "${var.name_prefix}-core"
-  cluster_arn               = var.cluster_arn
-  vpc_id                    = var.vpc_id
-  private_subnet_ids        = var.private_subnet_ids
-  namespace_id              = var.namespace_id
-  image                     = var.core_runtime.image
-  ecr_repository_arn        = var.core_runtime.ecr_repository_arn
-  container_port            = 8081
-  cpu                       = var.core_runtime.cpu
-  memory                    = var.core_runtime.memory
-  desired_count             = var.core_desired_count
-  first_task_definition_arn = var.core_first_task_definition_arn
-  environment               = merge(var.core_runtime.environment, { PLATFORM_CORE_PORT = "8081" })
-  secrets                   = var.core_runtime.secrets
-  execution_secret_arns     = var.core_runtime.execution_secret_arns
-  execution_kms_key_arns    = var.core_runtime.execution_kms_key_arns
-  health_check              = var.core_runtime.health_check
-  log_retention_days        = var.core_runtime.log_retention_days
-  tags                      = var.tags
+  additional_volume_names    = var.enrollment_tls_candidate.volume_names
+  additional_containers      = var.enrollment_tls_candidate.containers
+  app_mount_points           = var.enrollment_tls_candidate.app_mount_points
+  app_container_dependencies = var.enrollment_tls_candidate.app_dependencies
+  source                     = "../../../modules/ecs-service"
+  region                     = var.aws_region
+  name                       = "${var.name_prefix}-core"
+  cluster_arn                = var.cluster_arn
+  vpc_id                     = var.vpc_id
+  private_subnet_ids         = var.private_subnet_ids
+  namespace_id               = var.namespace_id
+  image                      = var.core_runtime.image
+  ecr_repository_arn         = var.core_runtime.ecr_repository_arn
+  container_port             = 8081
+  cpu                        = var.core_runtime.cpu
+  memory                     = var.core_runtime.memory
+  desired_count              = var.core_desired_count
+  first_task_definition_arn  = var.core_first_task_definition_arn
+  environment                = merge(var.core_runtime.environment, { PLATFORM_CORE_PORT = "8081" })
+  secrets                    = var.core_runtime.secrets
+  execution_secret_arns      = var.core_runtime.execution_secret_arns
+  execution_kms_key_arns     = var.core_runtime.execution_kms_key_arns
+  health_check               = var.core_runtime.health_check
+  log_retention_days         = var.core_runtime.log_retention_days
+  tags                       = var.tags
 }
 resource "aws_vpc_security_group_egress_rule" "alb_gateway" {
   for_each                     = toset(["8080", "9091"])

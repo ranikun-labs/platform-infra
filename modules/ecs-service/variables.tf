@@ -47,3 +47,20 @@ variable "health_check_grace_period_seconds" {
   type    = number
   default = 60
 }
+
+variable "additional_volume_names" {
+  type    = set(string)
+  default = []
+}
+variable "additional_containers" {
+  type    = any
+  default = []
+}
+variable "app_mount_points" {
+  type    = list(object({ sourceVolume = string, containerPath = string, readOnly = bool }))
+  default = []
+}
+variable "app_container_dependencies" {
+  type    = list(object({ containerName = string, condition = string }))
+  default = []
+}
