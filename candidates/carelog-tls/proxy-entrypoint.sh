@@ -58,9 +58,32 @@ openssl x509 -in "$CERT_FILE" -noout -ext basicConstraints 2>/dev/null | grep -q
 openssl x509 -in "$CERT_FILE" -noout -checkend 0 >/dev/null 2>&1 \
   || fail "server certificate is expired"
 
-# Expected name in the SAN list (exact DNS entry).
-openssl x509 -in "$CERT_FILE" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' | sed 's/^ *//' \
-  | grep -qx "DNS:$EXPECTED_SAN" \
+# Expected name: one plain DNS name (letters, digits, '.', '-'; no wildcard, space, newline or regex).
+# Normalised to lower case without a trailing dot.
+case "$EXPECTED_SAN" in
+  *[!A-Za-z0-9.-]*|'') fail "TLS_EXPECTED_DNS_SAN is not a plain DNS name" ;;
+esac
+EXPECTED_SAN="$(printf '%s' "$EXPECTED_SAN" | tr '[:upper:]' '[:lower:]' | sed 's/\.$//')"
+[ -n "$EXPECTED_SAN" ] || fail "TLS_EXPECTED_DNS_SAN is empty"
+
+# SAN check: one awk pass over the certificate's SAN entries. Each entry is compared as a whole
+# value (after 'DNS:' and trimming, lower case, trailing dot removed). No substring, prefix, suffix,
+# wildcard or regex matching. IP and other SAN types never match a DNS name.
+openssl x509 -in "$CERT_FILE" -noout -ext subjectAltName 2>/dev/null \
+  | tr -d '\r' \
+  | awk -v want="$EXPECTED_SAN" '
+      {
+        n = split($0, parts, ",")
+        for (i = 1; i <= n; i++) {
+          entry = parts[i]
+          gsub(/^[ \t]+|[ \t]+$/, "", entry)
+          if (substr(entry, 1, 4) != "DNS:") continue
+          value = tolower(substr(entry, 5))
+          sub(/\.$/, "", value)
+          if (value == want) found = 1
+        }
+      }
+      END { exit (found ? 0 : 1) }' \
   || fail "server certificate SAN does not contain the expected DNS name"
 
 # Pair check: the certificate and the key must have the same public key.

@@ -3,6 +3,7 @@
 # Checks that PEM newlines survive JSON encoding (env var and env-file variants), and that broken
 # encodings are refused by the entrypoint with a clear message and no secret content in the logs.
 # Usage: test-injection.sh <proxy-image> <material-dir>
+# shellcheck source=./lib.sh
 . "$(dirname "$0")/lib.sh"
 IMG="$1"; M="$2"
 W=$(make_work inj); trap 'rm -rf "$W"' EXIT INT TERM

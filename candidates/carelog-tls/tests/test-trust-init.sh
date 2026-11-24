@@ -1,6 +1,8 @@
 #!/bin/sh
+# shellcheck disable=SC2015 # pass/fail helpers never fail; A && pass || fail is intentional here
 # trust-init: baked bundle, 2-CA bundle, store growth, Core aliases preserved, and negative bundles.
 # Usage: test-trust-init.sh <trust-image (built from the Core digest, CA baked: 1 CA)> <core-image> <material-dir>
+# shellcheck source=./lib.sh
 . "$(dirname "$0")/lib.sh"
 TRUST="$1"; CORE="$2"; M="$3"
 W=$(make_work trust); trap 'rm -rf "$W"; docker volume rm -f carelog-tls-t-$$-a carelog-tls-t-$$-b carelog-tls-t-$$-c >/dev/null 2>&1' EXIT INT TERM

@@ -110,6 +110,27 @@ variable "enrollment_tls_candidate" {
   default = { volume_names = [], containers = [], app_mount_points = [], app_dependencies = [] }
 }
 
+# Enrollment-capable Core image for the TLS candidate. Null keeps the live Core image (core_runtime.image).
+# image: digest reference of the Core image the candidate Core task runs (pinned to the constant in core_env.tf).
+# trust_init_core_base: the Core digest the trust-init image was built FROM (its label). Must equal image.
+variable "enrollment_core_candidate" {
+  description = "Enrollment-capable Core image for the TLS candidate; null keeps the live Core image."
+  type = object({
+    image                = string
+    trust_init_core_base = string
+  })
+  default = null
+
+  validation {
+    condition     = var.enrollment_core_candidate == null || can(regex("^[0-9]{12}\\.dkr\\.ecr\\.ap-northeast-2\\.amazonaws\\.com/ranikun/platform/core@sha256:[a-f0-9]{64}$", try(var.enrollment_core_candidate.image, "")))
+    error_message = "enrollment_core_candidate.image must be a digest reference to ranikun/platform/core (repo@sha256:<64 hex>)."
+  }
+  validation {
+    condition     = var.enrollment_core_candidate == null || try(var.enrollment_core_candidate.trust_init_core_base, "") == try(var.enrollment_core_candidate.image, "-")
+    error_message = "trust_init_core_base must equal enrollment_core_candidate.image (trust-init must be built FROM the candidate Core digest)."
+  }
+}
+
 variable "enrollment_secret_arn" {
   description = "Existing enrollment bearer Secret ARN; null leaves enrollment disabled."
   type        = string

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Proxy entrypoint: positive and negative cases for the 1-secret bundle and the 3-secret fallback.
 # Usage: test-proxy-entrypoint.sh <proxy-image> <material-dir>
+# shellcheck source=./lib.sh
 . "$(dirname "$0")/lib.sh"
 IMG="$1"; M="$2"
 NET="carelog-tls-test-$$"; META="carelog-tls-test-meta-$$"; CASE="carelog-tls-test-case-$$"
@@ -46,6 +47,18 @@ run_case "3-secret: matching pair passes" pass - -e TLS_CERT_PEM="$(b leaf1.crt)
 run_case "1-secret: certificate/key mismatch refused" fail "do not match" -e TLS_BUNDLE_JSON="$(b bundle-mismatch.json)"
 run_case "1-secret: expired certificate refused" fail "expired" -e TLS_BUNDLE_JSON="$(b bundle-expired.json)"
 run_case "1-secret: SAN mismatch refused" fail "SAN" -e TLS_BUNDLE_JSON="$(b bundle-wrongsan.json)"
+run_case "SAN: case-insensitive exact match passes" pass - -e TLS_BUNDLE_JSON="$(b bundle-san-case.json)"
+run_case "SAN: trailing dot on the certificate name passes" pass - -e TLS_BUNDLE_JSON="$(b bundle-san-dot.json)"
+run_case "SAN: list with the name among other entries passes" pass - -e TLS_BUNDLE_JSON="$(b bundle-san-list.json)"
+run_case "SAN: prefix (x.name) refused" fail "SAN" -e TLS_BUNDLE_JSON="$(b bundle-san-prefix.json)"
+run_case "SAN: suffix (name.evil) refused" fail "SAN" -e TLS_BUNDLE_JSON="$(b bundle-san-suffix.json)"
+run_case "SAN: wildcard certificate refused" fail "SAN" -e TLS_BUNDLE_JSON="$(b bundle-san-wild.json)"
+run_case "SAN: IP-only certificate refused" fail "SAN" -e TLS_BUNDLE_JSON="$(b bundle-san-iponly.json)"
+run_case "expected name: substring of the SAN refused" fail "SAN" -e TLS_EXPECTED_DNS_SAN=carelog-dev-api.dev.internal -e TLS_BUNDLE_JSON="$(b bundle-ok.json)"
+run_case "expected name: upper case matches case-insensitively" pass - -e TLS_EXPECTED_DNS_SAN=RANIKUN-CARELOG-DEV-API.DEV.INTERNAL -e TLS_BUNDLE_JSON="$(b bundle-ok.json)"
+run_case "expected name: wildcard refused" fail "not a plain DNS name" -e TLS_EXPECTED_DNS_SAN="*.dev.internal" -e TLS_BUNDLE_JSON="$(b bundle-ok.json)"
+run_case "expected name: newline injection refused" fail "not a plain DNS name" -e TLS_EXPECTED_DNS_SAN="$(printf 'ranikun-carelog-dev-api.dev.internal\nDNS:evil')" -e TLS_BUNDLE_JSON="$(b bundle-ok.json)"
+run_case "expected name: regex metacharacters refused" fail "not a plain DNS name" -e TLS_EXPECTED_DNS_SAN="ranikun.*" -e TLS_BUNDLE_JSON="$(b bundle-ok.json)"
 run_case "1-secret: expected name is a variable (override refuses valid bundle)" fail "SAN" -e TLS_EXPECTED_DNS_SAN=other.invalid -e TLS_BUNDLE_JSON="$(b bundle-ok.json)"
 run_case "1-secret: CA certificate in leaf slot refused (swap)" fail "not a leaf" -e TLS_BUNDLE_JSON="$(b bundle-swap-ca.json)"
 run_case "1-secret: certificate placed in key field refused" fail "contains a certificate" -e TLS_BUNDLE_JSON="$(b bundle-key-field-cert.json)"

@@ -154,7 +154,7 @@ Not run: `terraform fmt/validate/test` (no Terraform file in `environments/dev/p
 
 ## 10. Update 2026-11-24 (external review A2): base digest, portable tests
 
-- Live Core digest used by the Core task definition `:3` is `ad9f84289f980aa708ec15213050fb912168c6f76d3c61c93d67ecdc27780001` (118 default CA entries). Section 4 used `8353cec4...` (117 entries). The trust-init image is now built and tested FROM the live digest.
+- Candidate Core (enrollment-capable) is `sha256:8353cec4...` (ECR pushed 2026-11-22). The live Core task definition `:3` uses `sha256:ad9f8428...` (118 default CA entries) and is the live reference only. The trust-init image is built FROM the candidate digest; the live base is used only for negative and existing-CA checks.
 - `Dockerfile.trust` records the base in the label `ranikun.carelog.core-base`. `tests/check-core-digest.sh` checks the label and the layer prefix. The draft workflow stops unless `core_image` equals repository variable `DEV_CORE_TASK_IMAGE` and the built image passes the check.
 - `trust-init.sh` writes the store under a working name and moves it into place last. It rejects an empty bundle, non-PEM content, any private key, a non-CA certificate, and an expired CA. A failed run leaves no `cacerts` in the volume.
 - `proxy-entrypoint.sh` validates before any network call: JSON object, the two keys, one leaf certificate, no key in the certificate field, parse checks, CA:FALSE, not expired, SAN `DNS:ranikun-carelog-dev-api.dev.internal` (variable `TLS_EXPECTED_DNS_SAN`), and the pair match. Messages name the check, never the values. The metadata lookup now runs after the checks.

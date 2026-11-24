@@ -214,3 +214,47 @@ RUN_AWS_SIM=1 TERRAFORM=<terraform 경로> sh candidates/carelog-tls/tests/run-a
 - 실제 ECS Secret 주입, Fargate 메타데이터 IP, 실제 CA 체인, Spring Boot 앱 테스트는 검증하지 못했다. 헬스 체크의 서버 인증서 비교는 오래된 리스너는 잡지만 잘못된 번들로 다시 로드된 경우는 못 잡는다.
 - IAM 시뮬레이션은 문서를 따로 평가한다. 실제 권한은 인라인 정책과 boundary의 교집합이다. 모듈이 Secret ARN에 `ssm:GetParameters`도 부여하는 기존 동작은 필요 이상으로 넓다.
 - 저장소 변수 `DEV_CORE_TASK_IMAGE`(Core Task의 digest)를 설정해야 초안 워크플로가 동작한다. 공개 CA 번들 파일 `candidates/carelog-tls/ca/carelog-dev-ca-bundle.pem`은 소유자가 커밋해야 한다. 복구 담당 정책과 Deny 연결 승인(`prep-aws-changes.md` 11행)이 필요하다.
+
+## 11. 외부 재검토 MAJOR 2건 반영 (기준 b4cd59d)
+
+AWS 쓰기, ECS 적용, 새 plan은 없다. 단일 Secret 설계를 유지했다.
+
+### 11.1 MAJOR 1: 가입 활성 시에만 Spring 프로필 `dev` 추가
+- 규칙(`environments/dev/platform/core_env.tf`): 가입 비활성이면 Core 환경이 라이브와 정확히 같다. 가입 활성이면 기존 프로필 목록 뒤에 `dev`를 한 번만 덧붙인다(공백 제거, 대소문자 무시, 중복 없음; 라이브가 비어 있으면 `dev`, `a, b`는 `a,b,dev`). 기존 또는 후보 목록에 `prod`·`production`(대소문자 무관)이 있으면 plan이 실패한다(키 이름만 출력).
+- 암묵적 `default` 프로필: platform-core(소스 `dc63569`)에는 프로필별 설정 파일과 `@Profile("default")`가 없어 `dev`만 활성이 되어도 잃는 설정이 없다. `dev` 프로필을 읽는 곳은 가입 등록 경로(`CarelogRegistrationCompositionConfiguration.java:47`, `requireDevComposition`: dev, prod 아님, 가입 활성)이고, 가입 클라이언트 자체(`CarelogEnrollmentClientConfiguration.java:15`)는 프로필 조건이 없다. 요청대로 가입 활성에 `dev`를 붙이되, 가입만으로 `dev`가 필요한 것은 아니라는 점을 기록한다.
+- JVM 옵션: 기존 `JAVA_TOOL_OPTIONS`를 순서대로 보존하고 없는 truststore 옵션만 덧붙인다. 같은 옵션이 중복되면 마지막 값이 이긴다(Core 이미지 JDK 21에서 실험). 따라서 기존에 다른 `trustStore`·비밀번호·형식이 있으면 조용히 덮어쓰지 않고 plan을 실패시킨다. 저장소 형식은 기본값 pkcs12와 같다.
+
+### 11.2 MAJOR 2: 가입 지원 Core 이미지 고정과 대조
+- 후보 Core 이미지를 `sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf`로 고정했다(코드 상수, 예시 입력, 테스트, 워크플로 초안). 라이브 `ad9f84…`는 "기존 CA 유지"와 음성 테스트의 기준으로만 쓴다.
+- 직접 대조: 입력 `enrollment_core_candidate`의 Core 이미지와 `trust_init_core_base`가 digest 형식이며 같지 않으면 Terraform 검증이 실패한다. `tests/check-core-digest.sh --tfvars`가 등록할 Core 입력과 trust-init의 라벨(`ranikun.carelog.core-base`)·레이어를 대조한다. 워크플로는 빌드 전후에 같은 검사를 한다. 저장소 변수 `DEV_CORE_TASK_IMAGE`는 이제 후보 digest를 뜻한다(설정하면 반드시 같아야 한다).
+- CA: 개수를 고정하지 않는다. 기반 이미지의 별칭 목록을 계산해 모두 남는지 확인하고, 가져온 CA 수만큼만 늘어나는지(1개→+1, 2개→+2) 확인한다.
+- 이미지 근거(`evidence-core-image.md`): 발행 run `44921734845` success, 태그 SHA·run head·소스 커밋 `dc635694…` 일치, digest 일치. 배포 승인은 없다(deploy skipped, 배포 기록 없음, PR #71 리뷰 0건). 후보에는 가입 클라이언트, 등록 컨트롤러, Core 마이그레이션 V3가 있고 라이브 `ad9f84…`에는 없다.
+
+### 11.3 항목 3: SAN 비교와 롤백 문구
+- `grep -Fqx` 비교를 제거했다. 기대 이름은 일반 DNS 이름(영문·숫자·점·하이픈, 와일드카드·공백·줄바꿈·정규식 문자 거부)만 허용하고 소문자와 후행 점을 정규화한다. 검사는 인증서의 DNS SAN 전체 값과의 정확한 일치(awk 한 번)이며 IP SAN은 일치하지 않는다. 접두·접미·부분 문자열·와일드카드 인증서·IP만 있는 인증서·줄바꿈 삽입·정규식 문자는 모두 거부하고, 대소문자·후행 점·목록 안의 이름은 통과한다.
+- 구버전 인증서 롤백 문구: 단일 번들의 이전 Secret 버전 복원(`AWSCURRENT` 이동) → 새 배포 → 서빙 인증서 지문 확인 → 계속 실패하면 Task revision `:6`으로 롤백. 인증서·키를 따로 두는 서술은 3-Secret 대안 절에만 남겼다. 가입용 Bearer Secret은 어떤 롤백 단계에서도 건드리지 않는다.
+
+### 11.4 Core V3·Carelog V9 적용 여부 (조회 가능한 경로만, 상세: `evidence-flyway-v9.md`)
+| 마이그레이션 | 결과 | 근거 |
+|---|---|---|
+| Core V3 (`identity` 스키마) | 마지막으로 기록된 시작 기준 **미적용** | Core 로그 2026-11-21 03:02~03:11Z에 V1·V2까지만 적용, 이후 Flyway 줄 없음. 수동 SQL 기록은 없으나 있었는지는 알 수 없다 |
+| Carelog V9 (`public` 스키마) | **알 수 없음** | 로그에 Flyway 줄 0건, 어떤 revision도 Flyway를 켜지 않음 |
+
+**중요**: 후보 Core 이미지는 시작할 때 Flyway가 자동으로 V3를 적용한다(`IdentityPersistenceConfiguration.java:110-112` → `IdentityLegacySchemaGuard.java:31`, 끄는 스위치 없음, 영속성은 기본 활성). 즉 후보 Core Task를 DEV에서 처음 시작하는 것이 곧 DEV DB 스키마 변경이며 승인 게이트가 없다. 별도 승인된 변경 절차 전에는 후보 Core를 시작하지 않는다. Carelog는 시작 시 마이그레이션을 하지 않으며 V9가 없으면 스키마 검증에서 시작이 실패한다(DDL은 실행되지 않음). 둘은 같은 `dev-shared` 클러스터의 `app` 데이터베이스를 쓴다. 확정하려면 DEV VPC 안에서 읽기 전용 계정으로 `evidence-flyway-v9.md`의 조회 쿼리를 실행해야 한다.
+
+### 11.5 재현 명령과 결과 (리드가 직접 실행)
+```
+export AWS_PROFILE=ranikun-admin MSYS_NO_PATHCONV=1
+RUN_AWS_SIM=1 TERRAFORM=<terraform 경로> sh candidates/carelog-tls/tests/run-all.sh
+# 각 루트: terraform init -backend=false; fmt -check -recursive; validate; test
+```
+| 항목 | 결과 |
+|---|---|
+| `run-all.sh` | OVERALL PASS rc 0. 단계 27개 통과, 하위 검사 104 PASS / 0 FAIL |
+| 하위 구성 | 프록시 엔트리포인트 28, 주입 6, trust-init 12+12(후보·라이브), JDK 신뢰 11, Core digest 8, IAM 시뮬레이션 27, Carelog `test-proxy.sh`, lint 전부 통과 |
+| Terraform test | carelog 10, platform 23, finance 1, shared 2 통과. 네 루트 `fmt`·`validate` 통과 |
+
+### 11.6 한계와 열린 항목
+- 라이브 DEV state에 대한 plan은 실행하지 않았다(mock 기준). 실제 ECS 주입, Fargate, 실제 CA 체인, 앱 테스트, 역할 생성 후의 `simulate-principal-policy`는 하지 않았다.
+- 판단은 소스 `dc63569`와 이미지 태그 접두어에서 추정한 것이다(Dockerfile 출처 라벨 아님).
+- 정해야 할 것: 후보 Core의 V3 자동 적용 승인, DEV DB 읽기 전용 조회 담당과 경로, 공개 CA 번들 파일 커밋 담당, `DEV_CORE_TASK_IMAGE` 설정, 복구 담당 정책과 Deny 연결 승인(`prep-aws-changes.md` 11행), 가입에 `dev`가 정말 필요한지, 새 Carelog 이미지의 DEV 배포 승인자. Gateway 후보 `1b00276e…`는 발행·배포 상태만 확인했다.

@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2034 # variables below are used by the scripts that source this file
 # Shared helpers for the Carelog TLS candidate tests. Sourced, not executed.
 # Every test prints one line per check: "PASS <name>" or "FAIL <name>" (+ a reason line).
 # Nothing generated is written into the repository: material lives in a mktemp directory.

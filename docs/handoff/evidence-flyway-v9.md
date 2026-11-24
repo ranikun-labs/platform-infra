@@ -79,3 +79,64 @@ Behaviour change against live `:6`: none for Flyway. Live has `CARELOG_FLYWAY_EN
 - No Spring Boot process was run. The `CarelogApplicationTests` and `IdentityFoundationMigrationTest` need JDK 21, Gradle and Docker Testcontainers; no JDK is installed on this host.
 - No SQL connection to the DEV database.
 - No ECS, RDS, or Secrets Manager writes.
+
+## 6. 2026-11-24 update: Core V3, Carelog V9 and shared database (read-only)
+
+This section was added on 2026-11-24 for the B3 request. Sections 1-5 above stay as written.
+
+### 6.1 Shared database
+
+Both services connect to the same Aurora cluster endpoint (host part only, from the task definitions; credentials not read):
+- Core `ranikun-platform-dev-core:3`, `PLATFORM_IDENTITY_DATASOURCE_URL`: host `dev-shared.cluster-c1i6wq6ka706.ap-northeast-2.rds.amazonaws.com`, database `app`. Core's own migrations use schema `identity` (`IdentityDatabaseSchema.NAME`, `IdentityDatabaseSchema.java`).
+- Carelog `ranikun-carelog-dev-api:6`, `SPRING_DATASOURCE_URL`: same host, database `app`. Carelog's V1 is unqualified, so it uses schema `public`.
+
+### 6.2 Core V3 (`V3__carelog_registration_operation.sql`)
+
+Introduced by commit `dc635694…` (PR #71), so it is in the candidate `8353cec4` and not in live `ad9f8428` (live migration directory: `V1__identity_schema.sql`, `V2__refresh_session_single_account.sql`; verified at `39c5ccd4…`).
+
+| Check | Evidence | Result |
+| --- | --- | --- |
+| Applied by a Core start in DEV | `/ecs/ranikun-platform-dev-core`, 2026-11-21 03:02:56-03:02:59Z: `Schema history table "identity"."flyway_schema_history" does not exist yet`, `Successfully validated 2 migrations`, `Migrating schema "identity" to version "1 - identity schema"`, `… version "2 - refresh session single account"`, `Successfully applied 2 migrations to schema "identity", now at version v2` | V1 and V2 applied by the app. **V3 not in this run** (it did not exist in the live image). |
+| Later starts | 03:11:15-03:11:17Z: `Successfully validated 2 migrations`, `Current version of schema "identity": 2`, `Schema "identity" is up to date. No migration necessary.` | Last recorded Flyway state: **version 2**. |
+| Any later Core start | Log stream `22ae6d8c…` runs 03:10-12:39Z on 2026-11-21 (no restart in that stream); no Flyway line after 03:11:17Z. `ranikun-platform-dev-core` service now ACTIVE, desired 0, running 0, task def `:3`. | No later Flyway run in the log group. |
+| Startup failures | 02:59:30Z and 03:02:25Z (`Application run failed`): `Identity Auth requires the Product claims integration when no CRMIdentityProjectionPort is configured` (configuration, before the Flyway run) | Not a migration failure. |
+| **Verdict** | **Not applied** as of the last recorded Core start (2026-11-21 03:11Z, version 2). No record of a manual application. | Unknown whether SQL was run by hand; none recorded. |
+
+What would decide it: a read-only query against `identity.flyway_schema_history` and the schema objects (below).
+
+### 6.3 Startup behaviour when the migration is missing
+
+Core (`platform-core`, candidate `8353cec4`):
+- Persistence is enabled by default: `IdentityPersistenceConfiguration.java:32-35` `@ConditionalOnProperty(... matchIfMissing = true)`.
+- Flyway runs inside application startup: `IdentityPersistenceConfiguration.java:110-112` (`FlywayMigrationStrategy` calls `IdentityLegacySchemaGuard.migrate`), and `IdentityLegacySchemaGuard.java:31` calls `flyway.migrate()`. There is no flag to skip it. So starting the candidate **applies V3 to DEV automatically** on the first start (no approval gate in the repository).
+- Hibernate runs with `hbm2ddl.auto=validate` (`IdentityPersistenceConfiguration.java:119-120`). If V3 were missing from the database, the new entity mapping (`credential_revision`, `carelog_registration_operation`) would fail schema validation at startup.
+- If the migration itself failed (for example, the trigger or CHECK), startup fails before the app serves traffic.
+
+Carelog (`carelog-be` `5d6aa88c`, image `2630045e`):
+- Flyway is enabled in the base profile (`application.yml:17` `enabled: true`) but in production it is `enabled: ${CARELOG_FLYWAY_ENABLED:false}` (`application-prod.yml:21`). The DEV release guard forces `SPRING_FLYWAY_ENABLED=false` (`dev-ecs-release.yml` lines 131-133), so Flyway does **not** run at startup. V9 is never applied by the app.
+- Schema validation: `ddl-auto: validate` (`application.yml:11`, `application-prod.yml:19`). If V9 (`users.external_account_id`, the receipts table, the CHECK) is missing, Hibernate fails at startup with a schema-validation error. No DDL is executed.
+- Therefore the candidate Carelog cannot start in DEV until V9 has been applied by another route.
+
+### 6.4 Carelog V9 status
+
+Unchanged from sections 4 and 5: **unknown**. No new evidence was found. The Carelog log group (`/ecs/ranikun-carelog-dev-api`) still has zero Flyway lines. No Carelog revision enables Flyway.
+
+### 6.5 Read-only queries and access needed
+
+Core V3 (schema `identity`, database `app`):
+```sql
+SELECT version, description, success, installed_on FROM identity.flyway_schema_history ORDER BY installed_rank DESC LIMIT 5;
+SELECT column_name FROM information_schema.columns WHERE table_schema = 'identity' AND table_name = 'password_credentials' AND column_name = 'credential_revision';
+SELECT to_regclass('identity.carelog_registration_operation') IS NOT NULL AS table_present;
+```
+
+Carelog V9 (schema `public`, database `app`):
+```sql
+SELECT version, success FROM flyway_schema_history ORDER BY installed_rank DESC LIMIT 5;
+SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'external_account_id';
+```
+
+Needed for a definitive answer (not used here):
+- Network path: a host inside the DEV VPC with TCP 5432 to `dev-shared` (the cluster is private; IAM database auth and the Data API are disabled per the RDS metadata). ECS Exec and one-off `run-task` are writes and are out of scope.
+- Credential owner: the DEV database owner, for a **read-only** role with `USAGE` on schemas `identity` and `public`, `SELECT` on the two `flyway_schema_history` tables, and `information_schema` access. The application secrets (`PLATFORM_IDENTITY_*` and Carelog datasource) are not to be used or read.
+- The Core and Carelog history tables must be read from the same database, `app`.

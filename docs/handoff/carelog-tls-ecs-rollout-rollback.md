@@ -8,7 +8,7 @@ Scope: the DEV service `ranikun-carelog-dev-api` (cluster `dev-shared`, account 
 
 - Proxy sidecar `carelog-tls-proxy` on 8080 (existing API allowlist) and 8443 (Core enrollment only).
 - One Secrets Manager secret holds the server bundle as JSON (`tls_certificate`, `tls_private_key`). The sidecar reads it as **one** env var, `TLS_BUNDLE_JSON`, from a **bare ARN with no json-key and no version suffix**. There is no separate CA secret. The CA is baked into the Core trust-init image (see `docs/handoff/prep-cert-secrets.md`).
-- The bundle secret is created and rotated by the owner, as described in `docs/handoff/prep-cert-secrets.md` section 3 (PutSecretValue, version rules, rollback to the previous version in section 3.4). This document does not repeat those commands.
+- The bundle secret is created and rotated by the owner, as described in `docs/handoff/prep-cert-secrets.md` section 3 (PutSecretValue and version rules); the recovery procedure is `prep-cert-secrets.md` section 11 (11.2 restores the previous version). This document does not repeat those commands.
 - The enrollment bearer secret is **`<ENROLLMENT_SECRET_ARN>`** (`ranikun/dev/carelog/enrollment-service`). It is an existing secret and is referenced unchanged (see section 1).
 
 Identifiers (not secret):
@@ -134,7 +134,20 @@ aws ecs wait services-stable --cluster dev-shared --services ranikun-carelog-dev
 
 Stop conditions are listed in section 7. Each step is one write; check the state before the next step.
 
-1. **Stop traffic and return to `:6`.**
+### 6.0 Old certificate recovery (try first, bundle only)
+
+Use this when the problem is the served certificate or the bundle version, and the task definition is correct.
+
+1. Restore the previous Secret **version** of the single bundle `<BUNDLE_ARN>`: follow `docs/handoff/prep-cert-secrets.md` section 11.2 (move `AWSCURRENT` back to the previous version; the commands live there and are not repeated here). Only the bundle is changed. Nothing else in Secrets Manager is touched, and the enrollment bearer secret is never part of this step.
+2. Force a new deployment of `ranikun-carelog-dev-api` on the current revision, so that new tasks read the restored version: `aws ecs update-service --cluster dev-shared --service ranikun-carelog-dev-api --task-definition <CURRENT_TD_ARN> --force-new-deployment`, then `services-stable`.
+3. Verify the served certificate against the restored version's expected value. The expected value is the SHA-256 fingerprint of the restored leaf certificate, recorded at section 11.1 step 1 from the public certificate file (never a key). Compare only the fingerprint strings, from an approved Core task or test host:
+   `openssl s_client -connect <TASK_IP>:8443 </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256`
+   The output must equal the recorded value. Do not print the bundle, the private key or the full PEM. The container health check also compares the served fingerprint with the file on disk (`task-fragments.json`).
+4. If the proxy still fails after steps 1-3 (UNHEALTHY after `startPeriod` plus retries, fingerprint mismatch, or 8443 not listening), go to section 6.1 below and roll the task definition back to `:6`.
+
+### 6.1 Full rollback: task definition to `:6`
+
+1. **Stop traffic and return to `:6`** (the fallback in section 6.0 step 4, or when the candidate must be removed).
    ```bash
    aws ecs update-service --cluster dev-shared --service ranikun-carelog-dev-api \
      --task-definition arn:aws:ecs:ap-northeast-2:124495093425:task-definition/ranikun-carelog-dev-api:6 --desired-count 0
@@ -142,7 +155,7 @@ Stop conditions are listed in section 7. Each step is one write; check the state
    ```
    Then `describe-services`: `taskDefinition` `:6`, `desiredCount` 0, `runningCount` 0.
 2. **Record** the rollback target `:6`, the candidate revision, the time, and the reason, in the operations log.
-3. **Bundle, only if it was changed and must be reverted.** The `:6` revision does not use the bundle, so this step is needed only before any new candidate is started again. Recover the previous bundle **version** by following `docs/handoff/prep-cert-secrets.md` section 3.4 (move `AWSCURRENT` back to `PreviousVersion`). Do not duplicate its commands here. Do not touch any other secret.
+3. **Bundle.** The `:6` revision does not reference the bundle, so reverting the bundle is not needed for the `:6` rollback. Recover the bundle only through section 6.0 (`prep-cert-secrets.md` section 11.2), and only before a new candidate is started again. Do not touch any other secret.
 4. **Core ingress.** Remove the 8443 ingress rule by Terraform: set `enrollment_core_security_group_id = null` in the protected inputs, plan, review, apply. Do not delete it by hand, or state drifts.
 5. **Execution policy.** Terraform reverts the execution inline policy to the baseline inputs (plan must show only the policy revert).
 6. **Keep `:6` and the candidate revision** registered. Do not deregister `:6`. Deregistering the candidate needs release-owner approval and a retention period.
@@ -166,4 +179,13 @@ Stop and escalate before the next step if any of these holds:
 
 ## 8. Platform (Core and Gateway)
 
-The Core trust-init container and `carelog-trust` volume change follow the same pattern against Core's current revision (merge, not replace). This document covers Carelog only. Gateway keeps its current configuration. Platform owns the Core procedure.
+The Core trust-init container and `carelog-trust` volume change follow the same pattern against Core's current revision (merge, not replace). This document covers Carelog only. Platform owns the Core procedure.
+
+Rollback targets for the platform services in DEV (read-only facts, 2026-11-24):
+
+| Service | Live revision to roll back to | Image digest | Candidate for this change | Notes |
+| --- | --- | --- | --- | --- |
+| Core `ranikun-platform-dev-core` | `:3` | `sha256:ad9f84289f980aa708ec15213050fb912168c6f76d3c61c93d67ecdc27780001` (commit `39c5ccd4…`, PR #69) | `sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf` (commit `dc635694…`, PR #71) | Candidate applies Flyway V3 at startup (`evidence-flyway-v9.md` section 6.3). Rolling back the image does not undo V3. Service is desired 0 now. |
+| Gateway `ranikun-platform-dev-gateway` | `:3` | `sha256:22267d151f3a4e88d85ce8bd7a0448d75a241fb9d82ecd943b4ca9280c61aa0f` | `sha256:1b00276e8e67e695f2753a6428fc576e351716c3687f22b9daf8e987508073d2` (same commit `dc635694…`) | Gateway `:3` keeps its cloudflared containers. Desired 0 now. |
+
+Core's candidate is not part of the Carelog rollout. Do not roll Core back as part of a Carelog incident unless the Core owner asks for it. The Core task revision rollback and its migration effects are the Core owner's procedure.

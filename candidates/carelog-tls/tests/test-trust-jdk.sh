@@ -1,7 +1,9 @@
 #!/bin/sh
+# shellcheck disable=SC2015 # pass/fail helpers never fail; A && pass || fail is intentional here
 # JDK client in the trust-init (Core-based) image against the TLS proxy, with the store produced by
 # trust-init. Covers: 1-CA and 2-CA stores, CA1 and CA2 leaves, wrong name, default-only store.
 # Usage: test-trust-jdk.sh <proxy-image> <trust-image> <material-dir> [javac-image]
+# shellcheck source=./lib.sh
 . "$(dirname "$0")/lib.sh"
 PROXY_IMG="$1"; TRUST="$2"; M="$3"; JAVAC_IMG="${4:-eclipse-temurin:21-jdk}"
 W=$(make_work jdk)
@@ -36,8 +38,10 @@ start_proxy() { # bundle file name in material dir
 # probe <label> <ok|fail> <volume-or-none> <url>: ok means the TLS handshake succeeded (proxy answers 403).
 probe() {
   label=$1; expect=$2; vol=$3; url=$4
+  # shellcheck disable=SC2086 # $mounts is a list of -v options (intended word splitting)
   mounts="-v $(host_path "$W"):/p"
   if [ "$vol" = none ]; then cmd="java -cp /p TlsProbe $url"; else mounts="$mounts -v $vol:/run/carelog-trust"; cmd="java -cp /p TlsProbe $url"; fi
+  # shellcheck disable=SC2086 # $mounts is a list of -v options (intended word splitting)
   out=$(docker run --rm --network "$NET" $mounts -e JAVA_TOOL_OPTIONS="$JTO" --entrypoint sh "$TRUST" -c "$cmd" 2>&1)
   if echo "$out" | grep -q '^HTTP 403'; then got=ok; else got=fail; fi
   if [ "$got" = "$expect" ]; then pass "$label"; else fail "$label" "expected $expect: $(echo "$out" | tail -1)"; fi

@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2086 # file names are generated without spaces; word splitting is intended
 # Generates THROWAWAY CA, leaf and bundle material for the local tests. Never used outside tests.
 # Runs inside the proxy image (openssl and jq). Usage: gen-material.sh <empty-output-dir>
 set -eu
@@ -77,4 +78,18 @@ cat ca1.crt ca1.key > ca-bundle-key.pem
 printf 'hello world\n' > ca-bundle-text.pem
 : > ca-bundle-empty.pem
 awk 'NR==3{print "junk line"} {print}' ca1.crt > ca-bundle-nonpem.pem
+# Leaves with other SAN shapes (all signed by CA 1). Arguments: name, SAN list as openssl writes it.
+mksan() {
+  printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=%s\n' "$2" > "$1.ext"
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$1.key" -out "$1.csr" -subj "/CN=san-test" >/dev/null 2>&1
+  openssl x509 -req -in "$1.csr" -CA ca1.crt -CAkey ca1.key -CAcreateserial -days 20 -extfile "$1.ext" -out "$1.crt" >/dev/null 2>&1
+  jq -c -n --rawfile c "$1.crt" --rawfile k "$1.key" '{tls_certificate: $c, tls_private_key: $k}' > "bundle-$1.json"
+}
+mksan san-prefix "DNS:x.$NAME"
+mksan san-suffix "DNS:$NAME.evil"
+mksan san-wild "DNS:*.dev.internal"
+mksan san-case "DNS:RANIKUN-CARELOG-DEV-API.DEV.INTERNAL"
+mksan san-dot "DNS:$NAME."
+mksan san-iponly "IP:10.0.0.1"
+mksan san-list "DNS:carelog.test,IP:10.0.0.1,DNS:$NAME"
 echo "material ready"

@@ -1,22 +1,33 @@
 # REVIEW CANDIDATE ONLY. Replace all placeholders with reviewed ARNs and image digests.
+# Platform root. Core env rules are in environments/dev/platform/core_env.tf:
+# - SPRING_PROFILES_ACTIVE is NOT set here. With enrollment on, Terraform appends "dev" to the live value.
+# - JAVA_TOOL_OPTIONS below is appended to the live options (never replaces them). A different live
+#   trustStore/trustStorePassword/trustStoreType fails the plan.
 enrollment_secret_arn = "REPLACE_WITH_ENROLLMENT_SECRET_ARN"
+
+# Enrollment-capable Core image (pinned; same digest as the trust-init base).
+enrollment_core_candidate = {
+  image                = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf"
+  trust_init_core_base = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf"
+}
+
 enrollment_tls_candidate = {
   volume_names = ["carelog-trust"]
   environment = {
     PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
-    PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
-    PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL = "https://ranikun-carelog-dev-api.dev.internal:8443"
-    JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+    PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED   = "true"
+    PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL  = "https://ranikun-carelog-dev-api.dev.internal:8443"
+    JAVA_TOOL_OPTIONS                              = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
   }
-  app_mount_points = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
-  app_dependencies = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
+  app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
+  app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
   ecr_repository_arns = ["REPLACE_WITH_INIT_ECR_REPOSITORY_ARN"]
-  secret_arns = [] # CA public certificate is baked into the trust-init image; no CA secret.
-  kms_key_arns = [] # Add only applicable customer-managed KMS key ARNs.
+  secret_arns         = [] # CA public certificate is baked into the trust-init image; no CA secret.
+  kms_key_arns        = [] # Add only applicable customer-managed KMS key ARNs.
   containers = [{
-    name = "carelog-trust-init"
-    image = "REPLACE_WITH_INIT_IMAGE_BY_SHA256"
-    essential = false
+    name        = "carelog-trust-init"
+    image       = "REPLACE_WITH_INIT_IMAGE_BY_SHA256"
+    essential   = false
     mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }]
   }]
 }

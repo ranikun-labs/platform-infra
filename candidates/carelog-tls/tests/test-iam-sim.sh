@@ -3,6 +3,7 @@
 # Documents: tests/iam/*.json (TLS statements only, sample suffix AbCdEf; 6 characters as the ?????? pattern).
 # Needs AWS credentials with iam:SimulateCustomPolicy. Skipped unless RUN_AWS_SIM=1 (reported as SKIP).
 # Usage: RUN_AWS_SIM=1 AWS_PROFILE=<profile> test-iam-sim.sh <proxy-image (for jq)>
+# shellcheck source=./lib.sh
 . "$(dirname "$0")/lib.sh"
 IMG="$1"
 if [ "${RUN_AWS_SIM:-0}" != 1 ]; then echo "SKIP test-iam-sim (set RUN_AWS_SIM=1 to run)"; exit 0; fi
@@ -32,6 +33,7 @@ done
 # sim <label> <document> <action> <resource> <expected: allowed|implicitDeny|explicitDeny>
 sim() {
   label=$1; doc=$2; action=$3; res=$4; want=$5
+  # shellcheck disable=SC2086 # PROFILE_ARGS is an intentional list of options
   r=$(aws $PROFILE_ARGS iam simulate-custom-policy --policy-input-list "file://$(cygpath -m "$W/$doc.arr.json" 2>/dev/null || echo "$W/$doc.arr.json")" \
         --action-names "$action" --resource-arns "$res" --output json 2>"$W/err.txt") || { fail "$label" "aws call failed: $(tail -1 "$W/err.txt")"; return; }
   got=$(echo "$r" | docker run --rm -i --entrypoint jq "$IMG" -r '.EvaluationResults[0].EvalDecision')

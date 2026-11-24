@@ -71,7 +71,7 @@ module "core" {
   vpc_id                                = var.vpc_id
   private_subnet_ids                    = var.private_subnet_ids
   namespace_id                          = var.namespace_id
-  image                                 = var.core_runtime.image
+  image                                 = local.core_image
   ecr_repository_arn                    = var.core_runtime.ecr_repository_arn
   container_port                        = 8081
   cpu                                   = var.core_runtime.cpu

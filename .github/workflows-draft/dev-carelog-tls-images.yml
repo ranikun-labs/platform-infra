@@ -33,7 +33,10 @@ jobs:
       PROXY_REPO: ranikun/carelog/tls-proxy
       INIT_REPO: ranikun/platform/core-trust-init
       CORE_IMAGE: ${{ inputs.core_image }}
-      EXPECTED_CORE_IMAGE: ${{ vars.DEV_CORE_TASK_IMAGE }}
+      # Repository variable DEV_CORE_TASK_IMAGE holds the CANDIDATE Core digest (the enrollment-capable 8353cec4 image,
+      # the same value as enrollment_core_candidate.image in candidates/carelog-tls/platform.tfvars.example).
+      # It is an optional second source; the tfvars example is the primary source.
+      CORE_VAR_IMAGE: ${{ vars.DEV_CORE_TASK_IMAGE }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -71,11 +74,20 @@ jobs:
           grep -q 'BEGIN CERTIFICATE' "$bundle"
           if grep -q 'PRIVATE KEY' "$bundle"; then echo "CA bundle contains a private key; refusing" >&2; exit 1; fi
 
-      - name: Check trust-init base equals the Core task definition digest
+      - name: Check core_image equals the candidate Core digest in the platform input
         run: |
           set -euo pipefail
-          test -n "$EXPECTED_CORE_IMAGE" || { echo "repository variable DEV_CORE_TASK_IMAGE (Core task definition image) is not set" >&2; exit 1; }
-          [ "$CORE_IMAGE" = "$EXPECTED_CORE_IMAGE" ] || { echo "core_image input differs from the Core task definition image; refusing to build" >&2; exit 1; }
+          # Primary source: the candidate Core image in the reviewed platform input (tfvars example).
+          input_core=$(sh candidates/carelog-tls/tests/check-core-digest.sh --print-candidate candidates/carelog-tls/platform.tfvars.example)
+          test -n "$input_core" || { echo "candidate Core image missing from the platform input" >&2; exit 1; }
+          [ "$CORE_IMAGE" = "$input_core" ] || { echo "core_image input differs from the candidate Core image in the platform input; refusing to build" >&2; exit 1; }
+          # Optional second source: if the repository variable is set it must agree (no silent drift).
+          if [ -n "$CORE_VAR_IMAGE" ] && [ "$CORE_VAR_IMAGE" != "$input_core" ]; then
+            echo "repository variable DEV_CORE_TASK_IMAGE differs from the candidate Core image in the platform input" >&2; exit 1
+          fi
+          # Pinned: the candidate digest must be the enrollment-capable 8353cec4 image (checked again after the build).
+          [ "$input_core" = "$ECR_REGISTRY/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf" ] \
+            || { echo "candidate Core image is not the pinned enrollment-capable digest" >&2; exit 1; }
 
       - name: Build and push trust-init (from Core digest)
         run: |
@@ -87,7 +99,7 @@ jobs:
             --build-arg SOURCE_SHA="$GITHUB_SHA" \
             -f candidates/carelog-tls/Dockerfile.trust -t "$ref" candidates/carelog-tls
           # Fails the job if the built image is not on the expected Core digest (label and layers).
-          sh candidates/carelog-tls/tests/check-core-digest.sh "$ref" "$EXPECTED_CORE_IMAGE"
+          CHECK_PINNED=1 sh candidates/carelog-tls/tests/check-core-digest.sh --tfvars candidates/carelog-tls/platform.tfvars.example "$ref"
           docker push "$ref"
           digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$ref")"
           echo "INIT_IMAGE=${digest}" >> "$GITHUB_ENV"
