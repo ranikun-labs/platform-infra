@@ -2,7 +2,7 @@
 
 상태: **검토용 브랜치. plan까지만 확인했다. apply·ECS 서비스 갱신·Task 정의 등록은 하지 않았다.**
 기준 커밋: `74b4c5e79036f32e508a2f30b8420fa9e6302c6a` (TLS 후보). 이 브랜치는 그 위에 보존 변경과 인계 자료만 얹는다.
-대상: 계정 124495093425, ap-northeast-2, 클러스터 `dev-shared`. 실행 프로필 `rankun-admin`(읽기·plan만).
+대상: 계정 124495093425, ap-northeast-2, 클러스터 `dev-shared`. 실행 프로필 `ranikun-admin`(읽기·plan만).
 
 이 문서에는 state, `tfvars`, plan 원문, Secret 값, 개인키, 환경변수 값이 없다. 리소스 주소와 액션, 변수 이름, 비밀이 아닌 식별자만 있다.
 
@@ -107,3 +107,37 @@ APPROVE 또는 지적 사항과 검토한 정확한 SHA를 알려 달라. 이 �
 3. 실제 TLS 값(프록시 이미지 digest, 인증서·키·CA 시크릿)이 생기면 `scripts/plan-summary.sh`로 비밀값 없는 plan 요약을 만들어 이 문서의 3번 표를 갱신한다.
 
 state·`tfvars`·plan 원문은 저장소에 두지 않는다. 입력 파일은 Mac mini에서 운영자 경로로 다시 만들어야 한다(라이브 revision에서 복원하는 방법은 4번 변수 목록 참고).
+
+## 8. 2026-11-24 갱신: 입력 대조와 구현 준비
+
+기준 코드는 41320c4이고 Terraform 코드는 바꾸지 않았다. 실행 프로필은 `ranikun-admin`이다(읽기·plan만). apply, ECS 갱신, AWS 쓰기는 하지 않았다.
+
+### 8.1 현재 AWS와 복원 입력 대조
+- Platform Core·Gateway는 `:3`, Carelog는 `:6`이 라이브이며 모두 desired 0이다. 이미지 digest, IAM boundary·trust 조건, Cloud Map, 보안 그룹, 공개 IP는 복원 입력과 일치한다. state 사본과 원격의 serial·lineage도 같다.
+- 입력이 같아 plan은 다시 만들었지만 결과가 같다. baseline Carelog `+1 / −1`, Platform `+2 / −2`. TLS Carelog `+2 / ~1 / −1`, Platform `+2 / ~1 / −2`. 삭제는 모두 Task 정의 교체(`skip_destroy=true`)다.
+- 실제 TLS 값(프록시·trust-init 이미지 digest, 인증서·키·CA Secret, ACM)은 AWS에 아직 없어 TLS plan은 계속 자리표시자 값이다.
+
+### 8.2 Carelog 이미지 `sha256:2630045e…` 근거 (상세: `evidence-carelog-image.md`)
+- **발행 성공**: carelog-be PR #61 머지 커밋 `5d6aa88c…`, run 45136354872(release/publish success, deploy skipped). ECR 태그 `5d6aa88c…-45136354872-1`(IMMUTABLE)의 digest가 같다.
+- **배포 승인**: 근거 없음. deploy가 skipped이고 해당 SHA의 deployment가 없으며 PR 리뷰 0건이다.
+- 후보에는 마이그레이션 V9(스키마 변경)가 있다. DEV 배포 가드가 Flyway를 막으므로 DEV DB에 V9가 먼저 있어야 한다. DB 상태는 확인하지 않았다. 이미지 롤백은 DDL을 되돌리지 못한다.
+
+### 8.3 구현 준비 (모두 로컬 빌드·테스트, 푸시·적용 없음)
+- 프록시·trust-init Dockerfile과 스크립트 보강, `nginx.conf` 경로 허용 목록 완성(`evidence-8080-api.md`), `test-proxy.sh` 허용·거부 검증(통과), trust-init로 JDK 클라이언트 TLS 검증(통과). 스텁 백엔드라서 실제 Carelog·Core·Fargate 검증은 안 했다.
+- 발행 워크플로 초안은 `.github/workflows-draft/`에 있어 동작하지 않는다(`prep-images.md`).
+- AWS 변경 목록은 `prep-aws-changes.md`, 인증서·키·CA 보관은 `prep-cert-secrets.md`(Secrets Manager 3개, ACM·ACM PCA는 DEV에 부적합), boundary 변경안은 `prep-iam-boundary.md`다. 비용은 2026-11-24 가정치이며 가격 페이지로 확인하지 않았다.
+- 시뮬레이션에서 Carelog·Core 실행 역할은 TLS용 Secret·ECR과 enrollment Secret에 implicitDeny다. enrollment Secret 누락은 TLS 이전부터의 문제다.
+
+### 8.4 적용 전에 고칠 불일치
+1. `task-fragments.json`의 앱 env에 `CARELOG_IDENTITY_ENROLLMENT_ENABLED=true`가 없다(없으면 8443이 404).
+2. 프록시 컨테이너에 `logConfiguration`과 명시적 `healthCheck`가 없다(ECS는 Dockerfile HEALTHCHECK를 쓰지 않는다).
+3. 앱 `SPRING_FLYWAY_ENABLED=false`를 추가한다(현재는 `CARELOG_FLYWAY_ENABLED=false`뿐, 값은 같다).
+4. 앱 `portMappings`는 tfvars에서 `[]`로 맞춰야 한다.
+5. 서버 인증서 SAN에 Cloud Map 이름이 있어야 한다. CA 이중 번들 교체는 테스트하지 않았다.
+6. 프록시 도입으로 `/rag/**`는 404 대신 403이 된다.
+
+### 8.5 아직 없는 참조 (AWS 쓰기 필요)
+ECR repo `ranikun/carelog/tls-proxy`, `ranikun/platform/core-trust-init`와 digest, Secret `ranikun/dev/carelog/enrollment-tls/{server-cert,server-key,ca-cert}`의 ARN, boundary v4와 담당자 승인. 이것이 생기기 전에는 plan을 의미 있게 다시 만들 수 없다.
+
+### 8.6 알 수 없는 것
+`:5`·`:6`을 누가 등록했는지, DEV DB의 V9 적용 여부, enrollment Secret ARN의 `:key::` 접미사 형식과 Core·Carelog의 Secret 공유 여부, Core 보안 그룹의 8081 인바운드 출처.

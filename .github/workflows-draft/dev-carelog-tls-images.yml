@@ -1,0 +1,99 @@
+# DRAFT ONLY. This file is under .github/workflows-draft/, so GitHub does not run it.
+# Move it to .github/workflows/ only after: the two ECR repositories exist, the OIDC role
+# below exists with the trust and permissions in docs/handoff/prep-images.md, and the
+# GitHub environment dev-carelog-tls-publish is configured with required reviewers.
+# Action pins reuse the SHAs already used by dev-ecs-release.yml.
+name: dev-carelog-tls-images (draft)
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_image:
+        description: "Core image by digest: <account>.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:<64 hex>"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-carelog-tls-images
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: dev-carelog-tls-publish
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REGISTRY: ${{ vars.DEV_ECR_REGISTRY }}
+      PROXY_REPO: ranikun/carelog/tls-proxy
+      INIT_REPO: ranikun/platform/core-trust-init
+      CORE_IMAGE: ${{ inputs.core_image }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate inputs and registry
+        run: |
+          set -euo pipefail
+          test -n "$AWS_REGION" && test -n "$ECR_REGISTRY"
+          [[ "$CORE_IMAGE" == "$ECR_REGISTRY/ranikun/platform/core@sha256:"* ]] || { echo "core_image must reference the Core ECR repository by digest" >&2; exit 1; }
+          [[ "${CORE_IMAGE##*@sha256:}" =~ ^[a-f0-9]{64}$ ]] || { echo "core_image digest is malformed" >&2; exit 1; }
+
+      - uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
+        with:
+          role-to-assume: ${{ vars.DEV_TLS_IMAGE_PUBLISHER_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: ECR login (push and pull of the Core base)
+        run: aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+      - name: Build and push TLS proxy sidecar
+        run: |
+          set -euo pipefail
+          ref="$ECR_REGISTRY/$PROXY_REPO:git-$GITHUB_SHA"
+          docker build --pull --provenance=false --sbom=false \
+            --build-arg SOURCE_SHA="$GITHUB_SHA" \
+            -f candidates/carelog-tls/Dockerfile -t "$ref" candidates/carelog-tls
+          docker push "$ref"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$ref")"
+          echo "PROXY_IMAGE=${digest}" >> "$GITHUB_ENV"
+
+      - name: Build and push trust-init (from Core digest)
+        run: |
+          set -euo pipefail
+          ref="$ECR_REGISTRY/$INIT_REPO:git-$GITHUB_SHA"
+          docker build --pull --provenance=false --sbom=false \
+            --build-arg CORE_IMAGE="$CORE_IMAGE" \
+            --build-arg SOURCE_SHA="$GITHUB_SHA" \
+            -f candidates/carelog-tls/Dockerfile.trust -t "$ref" candidates/carelog-tls
+          docker push "$ref"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$ref")"
+          echo "INIT_IMAGE=${digest}" >> "$GITHUB_ENV"
+
+      - name: Cross-check digests in ECR and record summary
+        run: |
+          set -euo pipefail
+          for pair in "$PROXY_REPO|$PROXY_IMAGE" "$INIT_REPO|$INIT_IMAGE"; do
+            repo="${pair%%|*}"; image="${pair#*|}"
+            tag="git-$GITHUB_SHA"
+            ecr_digest="$(aws ecr describe-images --repository-name "$repo" --image-ids imageTag="$tag" --query 'imageDetails[0].imageDigest' --output text)"
+            [[ "$image" == *"@$ecr_digest" ]] || { echo "digest mismatch for $repo" >&2; exit 1; }
+            scan="$(aws ecr describe-image-scan-findings --repository-name "$repo" --image-id imageDigest="$ecr_digest" --query 'imageScanStatus.status' --output text 2>/dev/null || true)"
+            echo "$repo scan status: ${scan:-not available}"
+          done
+          {
+            echo "### dev carelog TLS images (source SHA -> digest)"
+            echo ""
+            echo "| Image | Source SHA | Digest reference |"
+            echo "| --- | --- | --- |"
+            echo "| $PROXY_REPO | $GITHUB_SHA | $PROXY_IMAGE |"
+            echo "| $INIT_REPO | $GITHUB_SHA | $INIT_IMAGE |"
+            echo ""
+            echo "Core base: $CORE_IMAGE"
+            echo ""
+            echo "Use these digest references in task definitions. Do not deploy by tag."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -32,7 +32,7 @@ Customers, customer-events and claims reached the static backend stub (404), enr
 Use the existing protected DEV `terraform.tfvars` values, state backend bucket and AWS profile. Do not print tfvars or state because they may contain sensitive material. The repository operator workflow documents required inputs. Run backend initialization against the existing correct state before a read-only plan, for each of `environments/dev/platform` and `environments/dev/carelog`. For example, from the chosen environment, with protected tfvars already provisioned:
 
 ```powershell
-$env:AWS_PROFILE = 'rankun-admin'
+$env:AWS_PROFILE = 'ranikun-admin'
 terraform init -input=false -backend-config='bucket=ranikun-dev-tfstate-124495093425' -backend-config='region=ap-northeast-2' -backend-config='allowed_account_ids=["124495093425"]'
 terraform plan -input=false -lock-timeout=5m -var-file='<protected-tfvars>' -out='<secure-plan-path>'
 ```
