@@ -9,7 +9,7 @@
       "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/shared-identity/jwt-ZJU32o",
       "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/shared-identity/product-claims-We3hNi",
       "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/shared-identity/redis-J3BC1v",
-      "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-service-XXXXXX"
+      "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-service-??????"
     ]}
   ]
 }

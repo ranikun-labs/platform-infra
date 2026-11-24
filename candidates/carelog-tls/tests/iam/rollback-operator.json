@@ -3,6 +3,6 @@
   "Statement": [
     {"Sid": "BundleVersionStageRollback", "Effect": "Allow", "Action": ["secretsmanager:DescribeSecret", "secretsmanager:ListSecretVersionIds", "secretsmanager:UpdateSecretVersionStage"], "Resource": "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-tls/server-bundle-??????"},
     {"Sid": "CarelogServiceRollback", "Effect": "Allow", "Action": ["ecs:DescribeServices", "ecs:UpdateService", "ecs:DescribeTaskDefinition"], "Resource": ["arn:aws:ecs:ap-northeast-2:124495093425:service/*/ranikun-carelog-dev-api", "arn:aws:ecs:ap-northeast-2:124495093425:task-definition/ranikun-carelog-dev-api:*"]},
-    {"Sid": "ProtectEnrollmentBearerSecret", "Effect": "Deny", "Action": "secretsmanager:*", "Resource": "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-service-XXXXXX"}
+    {"Sid": "ProtectEnrollmentBearerSecret", "Effect": "Deny", "Action": "secretsmanager:*", "Resource": "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-service-??????"}
   ]
 }

@@ -8,7 +8,7 @@
       "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/shared-identity/gateway-internal-ewgQGn",
       "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/shared-identity/jwt-ZJU32o",
       "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/shared-identity/redis-J3BC1v",
-      "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-service-XXXXXX",
+      "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-service-??????",
       "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-tls/server-bundle-??????"
     ]}
   ]

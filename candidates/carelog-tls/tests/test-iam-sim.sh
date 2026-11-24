@@ -1,6 +1,9 @@
 #!/bin/sh
 # IAM allow/deny checks with simulate-custom-policy (read-only AWS call, no changes).
-# Documents: tests/iam/*.json (TLS statements only, sample suffix AbCdEf; 6 characters as the ?????? pattern).
+# Documents: tests/iam/*.json (TLS statements only). The enrollment secret uses its REAL ARN suffix (bhPLuJ),
+# verified read-only: aws secretsmanager describe-secret --secret-id ranikun/dev/carelog/enrollment-service --query ARN
+# The bundle/CA ARNs are placeholders (AbCdEf): those secrets do not exist in dev yet.
+# Re-check the enrollment suffix if the secret is ever recreated; the policies match any 6-character suffix (??????).
 # Needs AWS credentials with iam:SimulateCustomPolicy. Skipped unless RUN_AWS_SIM=1 (reported as SKIP).
 # Usage: RUN_AWS_SIM=1 AWS_PROFILE=<profile> test-iam-sim.sh <proxy-image (for jq)>
 # shellcheck source=./lib.sh
@@ -12,11 +15,13 @@ W=$(make_work iam); trap 'rm -rf "$W"' EXIT INT TERM
 A=arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog
 BUN=$A/enrollment-tls/server-bundle-AbCdEf
 CA=$A/enrollment-tls/ca-cert-AbCdEf
-ENR=$A/enrollment-service-XXXXXX
+ENR=$A/enrollment-service-bhPLuJ
+ENR_OTHER=$A/enrollment-service-other
+ENR_LONG=$A/enrollment-service-bhPLuJx
 ECR_PROXY=arn:aws:ecr:ap-northeast-2:124495093425:repository/ranikun/carelog/tls-proxy
 ECR_INIT=arn:aws:ecr:ap-northeast-2:124495093425:repository/ranikun/platform/core-trust-init
-ECS_CARELOG=arn:aws:ecs:ap-northeast-2:124495093425:service/ranikun-dev-cluster/ranikun-carelog-dev-api
-ECS_CORE=arn:aws:ecs:ap-northeast-2:124495093425:service/ranikun-dev-cluster/ranikun-platform-dev-core
+ECS_CARELOG=arn:aws:ecs:ap-northeast-2:124495093425:service/dev-shared/ranikun-carelog-dev-api
+ECS_CORE=arn:aws:ecs:ap-northeast-2:124495093425:service/dev-shared/ranikun-platform-dev-core
 
 # Static check: the rollback operator document never allows anything on the enrollment secret.
 if docker run --rm -v "$(host_path "$CANDIDATE_DIR/tests/iam"):/d:ro" --entrypoint jq "$IMG" -e \
@@ -63,8 +68,16 @@ sim "rollback operator: restore enrollment denied" rollback-operator secretsmana
 sim "rollback operator: rotate enrollment denied" rollback-operator secretsmanager:RotateSecret "$ENR" explicitDeny
 sim "rollback operator: delete enrollment denied" rollback-operator secretsmanager:DeleteSecret "$ENR" explicitDeny
 sim "rollback operator: read enrollment denied" rollback-operator secretsmanager:GetSecretValue "$ENR" explicitDeny
+sim "rollback operator: describe enrollment denied" rollback-operator secretsmanager:DescribeSecret "$ENR" explicitDeny
 sim "rollback operator: put on bundle not granted" rollback-operator secretsmanager:PutSecretValue "$BUN" implicitDeny
 sim "rollback operator: update carelog service" rollback-operator ecs:UpdateService "$ECS_CARELOG" allowed
 sim "rollback operator: update core service not granted" rollback-operator ecs:UpdateService "$ECS_CORE" implicitDeny
+
+# Negative name matching: ?????? is exactly 6 characters, so other enrollment-service names must not be granted.
+sim "carelog boundary: enrollment-service-other not granted" carelog-tls-boundary secretsmanager:GetSecretValue "$ENR_OTHER" implicitDeny
+sim "carelog boundary: 7-char suffix not granted" carelog-tls-boundary secretsmanager:GetSecretValue "$ENR_LONG" implicitDeny
+sim "core boundary: enrollment-service-other not granted" core-tls-boundary secretsmanager:GetSecretValue "$ENR_OTHER" implicitDeny
+sim "terraform carelog execution: enrollment-service-other not granted" terraform-carelog-execution secretsmanager:GetSecretValue "$ENR_OTHER" implicitDeny
+sim "terraform core execution: enrollment-service-other not granted" terraform-core-execution secretsmanager:GetSecretValue "$ENR_OTHER" implicitDeny
 
 summary test-iam-sim
