@@ -11,6 +11,14 @@ enrollment_core_candidate = {
   trust_init_core_base = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf"
 }
 
+# Documentation gate for the Flyway V3 migration of the candidate Core (NOT proof). Required because the
+# candidate image differs from the live image. Fill in after the read-only V3 check in
+# docs/handoff/carelog-tls-ecs-rollout-rollback.md section 8.1 (reference = approved change id or URL).
+core_v3_db_change_approval = {
+  reference           = "REPLACE_WITH_CHANGE_REFERENCE"
+  v3_state_checked_at = "REPLACE_WITH_ISO_8601_TIME"
+}
+
 enrollment_tls_candidate = {
   volume_names = ["carelog-trust"]
   environment = {

@@ -306,3 +306,48 @@ Tests: `environments/dev/platform/tests/core_env.tftest.hcl` (23 run blocks in t
 ## 13. 3-secret fallback (not recommended; documented for the security review only)
 
 Used only if the single bundle is rejected. Separate secrets: `ranikun/dev/carelog/enrollment-tls/server-cert` (leaf PEM) and `.../server-key` (leaf key PEM), and the CA (`ca-cert`) read by Core, or the CA baked as in section 3.2. The proxy reads `TLS_CERT_PEM` and `TLS_KEY_PEM` (the entrypoint keeps that path and runs the same pair and SAN checks). Certificate rollback in this design is two stage moves, one per secret, on matching versions, followed by a forced deployment; each must be verified by fingerprint (section 3.3 step 4). The version-skew risk exists in this design; it is covered only by the pair check at start. Costs and boundary statements are in section 5 and `prep-iam-boundary.md`.
+
+## 14. CA store difference (live ad9f8428 vs candidate 8353cec4) and Core outbound TLS (2026-11-24)
+
+Method: `keytool -list -v` on the `cacerts` of each Core image (public data; no secret). SHA-256 fingerprints compared as sets. The test is `candidates/carelog-tls/tests/ca-store-diff.sh`, which computes all counts from the images.
+
+Counts (computed): live store 118 entries, candidate store 117 entries. Both PKCS12. JDK: live `21.0.13`, candidate `21.0.13.1` (Temurin 21.0.13.1+2). The trust-init store is a copy of the image's own `cacerts` plus the private CA, so the effect of the image change is exactly the difference below.
+
+**Finding: one certificate exists only in the live store; none exists only in the candidate.** The other 117 certificates have identical SHA-256 fingerprints in both stores.
+
+| Alias | Subject CN | Valid until (UTC) | SHA-256 fingerprint |
+| --- | --- | --- | --- |
+| `cn_izenpecom,o_izenpe_sa,c_es [jdk]` | Izenpe.com (IZENPE S.A., ES) | 2037-12-13 08:27:25 | `25:30:CC:8E:98:32:15:02:BA:D9:6F:9B:1F:BA:1B:09:9E:2D:29:9E:0F:45:48:BB:91:4F:36:3B:C0:D4:53:1F` |
+
+Cause: not verified against the JDK change log. The difference is between two JDK builds (21.0.13 and 21.0.13.1), so the newer build most likely drops this root. Documented as an expected difference in `tests/ca-expected-differences.txt`. The test passes only while the difference is exactly this list; any other live-only or candidate-only certificate fails it.
+
+Required trust anchors present with identical fingerprints in both stores (`tests/ca-required-anchors.txt`): ISRG Root X1, ISRG Root X2, Amazon Root CA 1, 2, 3 and 4, Starfield Root Certificate Authority - G2. Amazon Root CA 1-4 and Starfield G2 are the roots of the AWS endpoints. Amazon RDS CA roots are in neither store (unchanged).
+
+Core outbound TLS, per connection (evidence: platform-services `dc63569` source, read by a shallow fetch; live task definition `:3` environment and secret NAMES only; a public TLS handshake to the Redis endpoint, without authentication):
+
+| Connection | Evidence | Trust the JVM uses | Status | Result |
+| --- | --- | --- | --- | --- |
+| Redis (Upstash, TLS) | Lettuce `client.useSsl()` when `redis-tls-enabled` (`identity/.../adapter/redis/IdentityRedisConfiguration.java:36`); live `PLATFORM_IDENTITY_REDIS_TLS_ENABLED=true` | JVM default truststore | live | **Unaffected.** Observed chain: `*.upstash.io` -> Let's Encrypt YE1 -> Root YE -> ISRG Root X2 (cross-sign). The ISRG self-signed anchors are in both stores with the same fingerprints. Izenpe is not in the chain. |
+| Postgres RDS (JDBC) | Live URL parameter `sslmode=require` for `PLATFORM_IDENTITY_DATASOURCE_URL` and `..._FLYWAY_DATASOURCE_URL`; no `sslrootcert` or `verify-full` anywhere in the repository | pgjdbc (not the JVM truststore for `require`) | live | **Unaffected** for `require`, which encrypts without certificate verification. From pgjdbc documentation, not re-tested here. A future `verify-full` would need the RDS CA bundle (absent from both stores). |
+| Carelog product claims (HTTP, port 8080) | `identity/.../productclaims/CarelogProductClaimsClientConfiguration.java:16` (enabled by `PLATFORM_IDENTITY_PRODUCT_CLAIMS_ENABLED`); live base URL is `http://` | none (no TLS) | live | **Unaffected.** |
+| Carelog enrollment (HTTPS 8443, candidate only) | `identity/.../adapter/enrollment/CarelogEnrollmentClientConfiguration.java:15`; private name `ranikun-carelog-dev-api.dev.internal`, private CA | trust-init store: Core cacerts plus the private CA | candidate only | **Unaffected by the Izenpe difference.** The chain is the private CA, which both images' copies include. |
+| Kakao OAuth (HTTPS) | `identity/.../oauth/kakao/KakaoOAuthClientConfig.java:15` is conditional on Kakao configuration; no Kakao name in the live task definition | JVM default | not configured | **Unaffected (not configured).** Would need a separate check if configured later. |
+| shared-ai (OpenAI) and shared-audit | Disabled by default (`SHARED_AI_*_ENABLED:false`, `SHARED_AUDIT_ENABLED:false` in `application.yml`); no such names in the live task definition | JVM default | not configured | **Unaffected (not configured).** |
+| AWS endpoints from the JVM (Secrets Manager, SSM, CloudWatch, S3) | No AWS SDK in the platform-core build files. Secrets are injected by the ECS agent at task start, and logs go through the ECS log driver, both outside the JVM | n/a | not applicable | **Not applicable to the JVM.** Amazon and Starfield roots are identical in both stores. |
+
+Conclusion per connection: **unaffected** for every configured connection (Redis TLS, RDS `require`, product claims HTTP, candidate enrollment), and **not configured** for the optional ones (Kakao, shared-ai, shared-audit). **Affected: none found.** **Unknown: none for the configured set**, with one limit: the Izenpe root is not evidenced in any configured chain, but a host that chains to it was not searched exhaustively. The live Core logs were not read for TLS errors in this task.
+
+Decision: the Izenpe difference is accepted as documented (no configured connection uses it). It is recorded in `tests/ca-expected-differences.txt`. If a configured outbound endpoint ever chains to Izenpe, the test and this section must be updated before the image is used.
+
+## 15. Enrollment all-or-nothing, V3 gate and candidate JAVA_TOOL_OPTIONS (A4, 2026-11-24)
+
+- **Candidate on** = merged env `PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED` or `PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED` is `true`. Off = candidate environment ignored; Core env names, secret names, execution secret count and containers equal the live inputs (test `disabled_inputs_identical_to_live`).
+- **Completeness gate (`enrollment_completeness`, all-or-nothing)**: the pinned Core image `8353cec4`; a trust-init container named `carelog-trust-init` with a digest-pinned image; volume `carelog-trust`; app mount at `/run/carelog-trust`, read-only; dependency on `carelog-trust-init` with condition `SUCCESS`; the private truststore options in `JAVA_TOOL_OPTIONS`; `dev` in `SPRING_PROFILES_ACTIVE`; the enrollment Bearer secret reference (`enrollment_secret_arn`, rendered as `PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL` and in the execution secrets); and no TLS server bundle given to Core. Each missing piece fails with its name (key or gate, never a value). Tests: one `expect_failures` run per missing piece, and a pass run.
+- **Candidate JAVA_TOOL_OPTIONS rules (live and candidate values)**: a truststore key other than our exact options (`trustStore`, `trustStorePassword`, or a `trustStoreType` other than `pkcs12`/`PKCS12`) fails; the same key twice with different values fails; an option that disables validation fails (name patterns `trustAll`, `insecure`, `nosslverif`, `disablehostname`, `sslcontext=`, `trustmanager`; `-Djavax.net.ssl.trustStore=NONE` fails as a different store). Revocation toggles (`-Dcom.sun.net.ssl.checkRevocation=false`) are allowed and kept, as decided.
+- **V3 documentation gate (`core_v3_gate`)**: required when the effective Core image differs from the live image (`core_runtime.image`), independent of the enrollment flag. Requires `core_v3_db_change_approval` with a non-placeholder `reference` and an ISO-8601 `v3_state_checked_at`. It is a documentation gate, not proof of the database state. Procedure: `docs/handoff/carelog-tls-ecs-rollout-rollback.md` section 8.1.
+- **Core inputs for review**: output `core_task_inputs` (names and counts only).
+- Tests: `environments/dev/platform/tests/core_env.tftest.hcl` (42 runs) and `contract.tftest.hcl` (2 runs): 44 passed, 0 failed.
+
+### 15.1 CA store and Core outbound TLS
+
+Section 14. The test is `candidates/carelog-tls/tests/ca-store-diff.sh`, checks: differences equal the documented list, required anchors present in both, alias differences explained.

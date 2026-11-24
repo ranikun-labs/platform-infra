@@ -1,0 +1,4 @@
+# Documented differences: CA certificates present in the LIVE Core store (ad9f8428, JDK 21.0.13) and absent
+# from the CANDIDATE store (8353cec4, JDK 21.0.13.1). Format: <SHA-256 fingerprint><TAB><alias><TAB><subject CN>.
+# ca-store-diff.sh fails on any live-only or candidate-only certificate not listed here.
+25:30:CC:8E:98:32:15:02:BA:D9:6F:9B:1F:BA:1B:09:9E:2D:29:9E:0F:45:48:BB:91:4F:36:3B:C0:D4:53:1F	cn_izenpecom,o_izenpe_sa,c_es [jdk]	Izenpe.com

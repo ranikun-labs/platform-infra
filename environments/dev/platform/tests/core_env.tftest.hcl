@@ -1,6 +1,7 @@
-# Core container env, SPRING_PROFILES_ACTIVE, JAVA_TOOL_OPTIONS and the enrollment-capable Core image.
-# Offline (mock provider). Live Core fixture keys follow the live DEV task definition ranikun-platform-dev-core:3
-# (names only; values are test fixtures). Each run states its full candidate input (no shared state).
+# Core task definition inputs for the Carelog TLS candidate. Offline (mock provider).
+# Live fixture keys follow the live DEV task definition ranikun-platform-dev-core:3 (names only; values are
+# test fixtures). The file-level candidate is COMPLETE (enrollment on, pinned Core, trust-init, wiring, secret,
+# V3 approval). Runs that need a different input state the whole input again.
 mock_provider "aws" {
   mock_data "aws_iam_policy_document" {
     defaults = { json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}" }
@@ -51,44 +52,85 @@ variables {
       PLATFORM_ENVIRONMENT                         = "dev"
       PLATFORM_IDENTITY_JWT_ACCESS_TOKEN_VALIDITY  = "900000"
     }
-    secrets                = {}
-    execution_secret_arns  = []
+    secrets = {
+      PLATFORM_IDENTITY_JWT_SECRET_KEY = "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/shared-identity/jwt-ZJU32o:signing_key::"
+    }
+    execution_secret_arns  = ["arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/shared-identity/jwt-ZJU32o"]
     execution_kms_key_arns = []
     health_check           = { command = ["CMD", "/test"], interval = 30, timeout = 5, retries = 3, start_period = 30 }
     log_retention_days     = 7
   }
+  enrollment_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-service-XXXXXX"
+  enrollment_core_candidate = {
+    image                = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf"
+    trust_init_core_base = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf"
+  }
+  core_v3_db_change_approval = {
+    reference           = "CHG-TEST-0001"
+    v3_state_checked_at = "2026-11-24T10:00:00Z"
+  }
+  enrollment_tls_candidate = {
+    volume_names        = ["carelog-trust"]
+    containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+    app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
+    app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
+    ecr_repository_arns = []
+    secret_arns         = []
+    kms_key_arns        = []
+    environment = {
+      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED  = "true"
+      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL = "https://ranikun-carelog-dev-api.dev.internal:8443"
+      JAVA_TOOL_OPTIONS                             = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+    }
+    app_port_mappings = []
+  }
 }
 
-# ---- Enrollment OFF: the Core environment equals the live one --------------------------------------
+# ---- Candidate OFF: inputs identical to live --------------------------------------------------------
 
-run "disabled_env_equals_live" {
+run "disabled_inputs_identical_to_live" {
   command = plan
 
   variables {
+    enrollment_core_candidate  = null
+    core_v3_db_change_approval = null
+    enrollment_secret_arn      = null
     enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
+      volume_names        = []
       containers          = []
       app_mount_points    = []
       app_dependencies    = []
       ecr_repository_arns = []
       secret_arns         = []
       kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL = "https://ranikun-carelog-dev-api.dev.internal:8443" }
+      environment         = {}
       app_port_mappings   = []
     }
   }
 
   assert {
     condition     = output.core_container_environment_names == sort(concat(keys(var.core_runtime.environment), ["PLATFORM_CORE_PORT"]))
-    error_message = "Enrollment off: Core env names must equal the live names plus PLATFORM_CORE_PORT."
+    error_message = "Candidate off: env names must equal live plus PLATFORM_CORE_PORT."
   }
   assert {
     condition     = output.core_spring_profiles_active == null && output.core_java_tool_options == null
-    error_message = "Enrollment off: no SPRING_PROFILES_ACTIVE and no JAVA_TOOL_OPTIONS may be added."
+    error_message = "Candidate off: no SPRING_PROFILES_ACTIVE and no JAVA_TOOL_OPTIONS may be added."
   }
   assert {
     condition     = output.core_image_effective == var.core_runtime.image
-    error_message = "Enrollment off and no candidate image: the live Core image is kept."
+    error_message = "Candidate off with no candidate image: the live image is kept."
+  }
+  assert {
+    condition     = output.core_task_inputs.candidate_on == false && length(output.core_task_inputs.container_names) == 0 && length(output.core_task_inputs.volume_names) == 0
+    error_message = "Candidate off: no extra containers or volumes."
+  }
+  assert {
+    condition     = output.core_task_inputs.mount_count == 0 && output.core_task_inputs.dependency_count == 0
+    error_message = "Candidate off: no app mounts or dependencies."
+  }
+  assert {
+    condition     = length(output.core_task_inputs.secret_names) == 1 && contains(output.core_task_inputs.secret_names, "PLATFORM_IDENTITY_JWT_SECRET_KEY") && output.core_task_inputs.execution_secret_count == 1
+    error_message = "Candidate off: Core secret references and execution secret ARNs must equal live."
   }
 }
 
@@ -102,8 +144,11 @@ run "disabled_keeps_live_profiles_and_options_untouched" {
         JAVA_TOOL_OPTIONS      = "-XX:MaxRAMPercentage=75.0 -Djavax.net.ssl.trustStore=/etc/other"
       })
     })
+    enrollment_core_candidate  = null
+    core_v3_db_change_approval = null
+    enrollment_secret_arn      = null
     enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
+      volume_names        = []
       containers          = []
       app_mount_points    = []
       app_dependencies    = []
@@ -117,38 +162,214 @@ run "disabled_keeps_live_profiles_and_options_untouched" {
 
   assert {
     condition     = output.core_spring_profiles_active == "a,prod"
-    error_message = "Enrollment off: live SPRING_PROFILES_ACTIVE must be unchanged."
+    error_message = "Candidate off: live SPRING_PROFILES_ACTIVE must be unchanged."
   }
   assert {
     condition     = output.core_java_tool_options == "-XX:MaxRAMPercentage=75.0 -Djavax.net.ssl.trustStore=/etc/other"
-    error_message = "Enrollment off: live JAVA_TOOL_OPTIONS must be unchanged (no truststore added)."
+    error_message = "Candidate off: live JAVA_TOOL_OPTIONS must be unchanged."
   }
 }
 
-# ---- Enrollment ON: SPRING_PROFILES_ACTIVE ---------------------------------------------------------
-
-run "enabled_live_profiles_empty_becomes_dev" {
-  command = plan
+run "disabled_candidate_image_needs_v3_approval" {
+  command         = plan
+  expect_failures = [terraform_data.core_v3_gate]
 
   variables {
+    core_v3_db_change_approval = null
     enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
+      volume_names        = []
       containers          = []
       app_mount_points    = []
       app_dependencies    = []
       ecr_repository_arns = []
       secret_arns         = []
       kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
+      environment         = {}
       app_port_mappings   = []
     }
   }
+}
+
+# ---- Candidate ON: complete input passes; each missing piece fails ----------------------------------
+
+run "enabled_complete_input_passes" {
+  command = plan
 
   assert {
+    condition     = output.core_image_effective == var.enrollment_core_candidate.image
+    error_message = "Candidate on: the pinned candidate Core image is rendered."
+  }
+  assert {
+    condition     = output.core_task_inputs.candidate_on == true && contains(output.core_task_inputs.secret_names, "PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL")
+    error_message = "Candidate on: the enrollment Bearer secret reference must be a Core secret."
+  }
+  assert {
+    condition     = output.core_task_inputs.execution_secret_count == 2
+    error_message = "Candidate on: the execution role must cover the live secret and the enrollment Bearer secret, and no TLS bundle."
+  }
+  assert {
     condition     = output.core_spring_profiles_active == "dev"
-    error_message = "Enrollment on with no live profile: SPRING_PROFILES_ACTIVE must be dev."
+    error_message = "Candidate on with no live profile: SPRING_PROFILES_ACTIVE must be dev."
+  }
+  assert {
+    condition     = output.core_java_tool_options == "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+    error_message = "Candidate on: truststore options only when the live value is empty."
   }
 }
+
+run "enabled_missing_candidate_image_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_completeness]
+
+  variables {
+    enrollment_core_candidate = null
+  }
+}
+
+run "enabled_missing_trust_init_container_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_completeness]
+
+  variables {
+    enrollment_tls_candidate = {
+      volume_names        = ["carelog-trust"]
+      containers          = []
+      app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
+      app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
+      ecr_repository_arns = []
+      secret_arns         = []
+      kms_key_arns        = []
+      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings   = []
+    }
+  }
+}
+
+run "enabled_trust_init_not_digest_pinned_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_completeness]
+
+  variables {
+    enrollment_tls_candidate = {
+      volume_names        = ["carelog-trust"]
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init:latest", essential = false }]
+      app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
+      app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
+      ecr_repository_arns = []
+      secret_arns         = []
+      kms_key_arns        = []
+      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings   = []
+    }
+  }
+}
+
+run "enabled_missing_volume_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_completeness]
+
+  variables {
+    enrollment_tls_candidate = {
+      volume_names        = []
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+      app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
+      app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
+      ecr_repository_arns = []
+      secret_arns         = []
+      kms_key_arns        = []
+      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings   = []
+    }
+  }
+}
+
+run "enabled_mount_not_read_only_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_completeness]
+
+  variables {
+    enrollment_tls_candidate = {
+      volume_names        = ["carelog-trust"]
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+      app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }]
+      app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
+      ecr_repository_arns = []
+      secret_arns         = []
+      kms_key_arns        = []
+      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings   = []
+    }
+  }
+}
+
+run "enabled_missing_init_dependency_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_completeness]
+
+  variables {
+    enrollment_tls_candidate = {
+      volume_names        = ["carelog-trust"]
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+      app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
+      app_dependencies    = []
+      ecr_repository_arns = []
+      secret_arns         = []
+      kms_key_arns        = []
+      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings   = []
+    }
+  }
+}
+
+run "enabled_missing_enrollment_secret_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_completeness]
+
+  variables {
+    enrollment_secret_arn = null
+  }
+}
+
+run "enabled_tls_bundle_given_to_core_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_completeness]
+
+  variables {
+    enrollment_tls_candidate = {
+      volume_names        = ["carelog-trust"]
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+      app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
+      app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
+      ecr_repository_arns = []
+      secret_arns         = ["arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-tls/server-bundle-AbCdEf"]
+      kms_key_arns        = []
+      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings   = []
+    }
+  }
+}
+
+run "enabled_registration_flag_alone_is_on" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_completeness]
+
+  variables {
+    enrollment_secret_arn = null
+    enrollment_tls_candidate = {
+      volume_names        = ["carelog-trust"]
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+      app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
+      app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
+      ecr_repository_arns = []
+      secret_arns         = []
+      kms_key_arns        = []
+      environment         = { PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings   = []
+    }
+  }
+}
+
+# ---- Candidate ON: SPRING_PROFILES_ACTIVE -----------------------------------------------------------
 
 run "enabled_appends_dev_to_existing_profiles" {
   command = plan
@@ -157,22 +378,11 @@ run "enabled_appends_dev_to_existing_profiles" {
     core_runtime = merge(var.core_runtime, {
       environment = merge(var.core_runtime.environment, { SPRING_PROFILES_ACTIVE = "a, b" })
     })
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
-    }
   }
 
   assert {
     condition     = output.core_spring_profiles_active == "a,b,dev"
-    error_message = "Enrollment on: dev must be appended once to the existing comma list (trimmed)."
+    error_message = "Candidate on: dev must be appended once to the existing comma list (trimmed)."
   }
 }
 
@@ -183,22 +393,11 @@ run "enabled_dev_already_present_no_duplicate" {
     core_runtime = merge(var.core_runtime, {
       environment = merge(var.core_runtime.environment, { SPRING_PROFILES_ACTIVE = "DEV,a" })
     })
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
-    }
   }
 
   assert {
     condition     = output.core_spring_profiles_active == "DEV,a"
-    error_message = "Enrollment on: an existing dev (any case) must not be duplicated or changed."
+    error_message = "Candidate on: an existing dev (any case) must not be duplicated or changed."
   }
 }
 
@@ -209,22 +408,11 @@ run "enabled_dev_lowercase_last_no_duplicate" {
     core_runtime = merge(var.core_runtime, {
       environment = merge(var.core_runtime.environment, { SPRING_PROFILES_ACTIVE = " a , dev " })
     })
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
-    }
   }
 
   assert {
     condition     = output.core_spring_profiles_active == "a,dev"
-    error_message = "Enrollment on: whitespace is trimmed and dev is not duplicated."
+    error_message = "Candidate on: whitespace is trimmed and dev is not duplicated."
   }
 }
 
@@ -236,17 +424,6 @@ run "enabled_prod_in_live_list_fails" {
     core_runtime = merge(var.core_runtime, {
       environment = merge(var.core_runtime.environment, { SPRING_PROFILES_ACTIVE = "prod" })
     })
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
-    }
   }
 }
 
@@ -258,17 +435,6 @@ run "enabled_production_upper_case_in_list_fails" {
     core_runtime = merge(var.core_runtime, {
       environment = merge(var.core_runtime.environment, { SPRING_PROFILES_ACTIVE = "a, PRODUCTION " })
     })
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
-    }
   }
 }
 
@@ -279,14 +445,18 @@ run "enabled_prod_from_candidate_fails" {
   variables {
     enrollment_tls_candidate = {
       volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+      app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
+      app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
       ecr_repository_arns = []
       secret_arns         = []
       kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", SPRING_PROFILES_ACTIVE = "prod" }
-      app_port_mappings   = []
+      environment = {
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        SPRING_PROFILES_ACTIVE                       = "prod"
+        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+      }
+      app_port_mappings = []
     }
   }
 }
@@ -298,26 +468,15 @@ run "enabled_substring_prod_is_not_a_production_profile" {
     core_runtime = merge(var.core_runtime, {
       environment = merge(var.core_runtime.environment, { SPRING_PROFILES_ACTIVE = "preprod-like" })
     })
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
-    }
   }
 
   assert {
     condition     = output.core_spring_profiles_active == "preprod-like,dev"
-    error_message = "Only whole list elements prod/production are refused, not substrings."
+    error_message = "Only whole list elements prod or production are refused, not substrings."
   }
 }
 
-# ---- Enrollment ON: JAVA_TOOL_OPTIONS --------------------------------------------------------------
+# ---- Candidate ON: live JAVA_TOOL_OPTIONS ------------------------------------------------------------
 
 run "enabled_jto_live_options_preserved_and_truststore_appended" {
   command = plan
@@ -326,25 +485,17 @@ run "enabled_jto_live_options_preserved_and_truststore_appended" {
     core_runtime = merge(var.core_runtime, {
       environment = merge(var.core_runtime.environment, { JAVA_TOOL_OPTIONS = "-XX:MaxRAMPercentage=75.0 -Dfoo=bar" })
     })
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
+    enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
       environment = {
         PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
         JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
       }
-      app_port_mappings = []
-    }
+    })
   }
 
   assert {
     condition     = output.core_java_tool_options == "-XX:MaxRAMPercentage=75.0 -Dfoo=bar -Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
-    error_message = "Live JVM options must be kept in order and the truststore options appended once."
+    error_message = "Live JVM options kept in order; the truststore options appended once."
   }
 }
 
@@ -355,22 +506,11 @@ run "enabled_jto_already_ours_no_duplicate" {
     core_runtime = merge(var.core_runtime, {
       environment = merge(var.core_runtime.environment, { JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" })
     })
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
-    }
   }
 
   assert {
     condition     = output.core_java_tool_options == "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
-    error_message = "Options already equal to the truststore settings must not be duplicated."
+    error_message = "Options already equal to ours must not be duplicated."
   }
 }
 
@@ -381,26 +521,15 @@ run "enabled_jto_pkcs12_type_is_accepted" {
     core_runtime = merge(var.core_runtime, {
       environment = merge(var.core_runtime.environment, { JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStoreType=pkcs12" })
     })
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
-    }
   }
 
   assert {
     condition     = output.core_java_tool_options == "-Djavax.net.ssl.trustStoreType=pkcs12 -Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
-    error_message = "The JDK default store type pkcs12 is compatible with the produced store and must be kept."
+    error_message = "The JDK default store type pkcs12 is compatible and must be kept."
   }
 }
 
-run "enabled_jto_other_truststore_fails" {
+run "enabled_live_jto_other_truststore_fails" {
   command         = plan
   expect_failures = [terraform_data.enrollment_candidate_guard]
 
@@ -408,21 +537,10 @@ run "enabled_jto_other_truststore_fails" {
     core_runtime = merge(var.core_runtime, {
       environment = merge(var.core_runtime.environment, { JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/etc/other/cacerts" })
     })
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
-    }
   }
 }
 
-run "enabled_jto_other_password_fails" {
+run "enabled_live_jto_other_password_fails" {
   command         = plan
   expect_failures = [terraform_data.enrollment_candidate_guard]
 
@@ -430,21 +548,10 @@ run "enabled_jto_other_password_fails" {
     core_runtime = merge(var.core_runtime, {
       environment = merge(var.core_runtime.environment, { JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStorePassword=other" })
     })
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
-    }
   }
 }
 
-run "enabled_jto_jks_type_fails" {
+run "enabled_live_jto_jks_type_fails" {
   command         = plan
   expect_failures = [terraform_data.enrollment_candidate_guard]
 
@@ -452,87 +559,124 @@ run "enabled_jto_jks_type_fails" {
     core_runtime = merge(var.core_runtime, {
       environment = merge(var.core_runtime.environment, { JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStoreType=JKS" })
     })
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
-    }
   }
 }
 
-# ---- Enrollment ON: env overrides and Core image ---------------------------------------------------
+# ---- Candidate ON: candidate-provided JAVA_TOOL_OPTIONS ---------------------------------------------
+
+run "candidate_jto_other_truststore_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_candidate_guard]
+
+  variables {
+    enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
+      environment = {
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStore=/tmp/other.jks"
+      }
+    })
+  }
+}
+
+run "candidate_jto_other_password_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_candidate_guard]
+
+  variables {
+    enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
+      environment = {
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStorePassword=other"
+      }
+    })
+  }
+}
+
+run "candidate_jto_same_key_twice_different_values_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_candidate_guard]
+
+  variables {
+    enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
+      environment = {
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStore=/etc/x.jks -Djavax.net.ssl.trustStorePassword=changeit"
+      }
+    })
+  }
+}
+
+run "candidate_jto_trust_all_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_candidate_guard]
+
+  variables {
+    enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
+      environment = {
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustAll=true -Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+      }
+    })
+  }
+}
+
+run "candidate_jto_trust_store_none_fails" {
+  command         = plan
+  expect_failures = [terraform_data.enrollment_candidate_guard]
+
+  variables {
+    enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
+      environment = {
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStore=NONE"
+      }
+    })
+  }
+}
+
+run "candidate_jto_revocation_toggle_is_allowed" {
+  command = plan
+
+  variables {
+    enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
+      environment = {
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        JAVA_TOOL_OPTIONS                            = "-Dcom.sun.net.ssl.checkRevocation=false -Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+      }
+    })
+  }
+
+  assert {
+    condition     = output.core_java_tool_options == "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit -Dcom.sun.net.ssl.checkRevocation=false"
+    error_message = "A revocation-check toggle is not a trust bypass and is kept."
+  }
+}
+
+# ---- Candidate ON: overrides and Core image --------------------------------------------------------
 
 run "enabled_candidate_override_of_live_key_fails" {
   command         = plan
   expect_failures = [terraform_data.enrollment_candidate_guard]
 
   variables {
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", PLATFORM_ENVIRONMENT = "staging" }
-      app_port_mappings   = []
-    }
+    enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
+      environment = {
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        PLATFORM_ENVIRONMENT                         = "staging"
+        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+      }
+    })
   }
 }
 
-run "candidate_image_pinned_and_matching_base_is_used" {
-  command = plan
-
-  variables {
-    enrollment_core_candidate = {
-      image                = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf"
-      trust_init_core_base = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf"
-    }
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
-    }
-  }
-
-  assert {
-    condition     = output.core_image_effective == "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf"
-    error_message = "The candidate Core image must be the pinned 8353cec4 digest."
-  }
-}
-
-run "candidate_image_not_pinned_fails" {
+run "enabled_candidate_image_not_pinned_fails" {
   command         = plan
-  expect_failures = [terraform_data.enrollment_candidate_guard]
+  expect_failures = [terraform_data.enrollment_candidate_guard, terraform_data.enrollment_completeness]
 
   variables {
     enrollment_core_candidate = {
       image                = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:ad9f84289f980aa708ec15213050fb912168c6f76d3c61c93d67ecdc27780001"
       trust_init_core_base = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:ad9f84289f980aa708ec15213050fb912168c6f76d3c61c93d67ecdc27780001"
-    }
-    enrollment_tls_candidate = {
-      volume_names        = ["carelog-trust"]
-      containers          = []
-      app_mount_points    = []
-      app_dependencies    = []
-      ecr_repository_arns = []
-      secret_arns         = []
-      kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true" }
-      app_port_mappings   = []
     }
   }
 }
@@ -558,5 +702,78 @@ run "candidate_image_tag_reference_fails_validation" {
       image                = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core:latest"
       trust_init_core_base = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core:latest"
     }
+  }
+}
+
+# ---- V3 documentation gate ---------------------------------------------------------------------------
+
+run "v3_candidate_without_approval_fails" {
+  command         = plan
+  expect_failures = [terraform_data.core_v3_gate]
+
+  variables {
+    core_v3_db_change_approval = null
+  }
+}
+
+run "v3_empty_reference_fails" {
+  command         = plan
+  expect_failures = [terraform_data.core_v3_gate]
+
+  variables {
+    core_v3_db_change_approval = { reference = "  ", v3_state_checked_at = "2026-11-24T10:00:00Z" }
+  }
+}
+
+run "v3_placeholder_reference_fails" {
+  command         = plan
+  expect_failures = [terraform_data.core_v3_gate]
+
+  variables {
+    core_v3_db_change_approval = { reference = "REPLACE_WITH_CHANGE_ID", v3_state_checked_at = "2026-11-24T10:00:00Z" }
+  }
+}
+
+run "v3_bad_time_fails" {
+  command         = plan
+  expect_failures = [terraform_data.core_v3_gate]
+
+  variables {
+    core_v3_db_change_approval = { reference = "CHG-TEST-0001", v3_state_checked_at = "yesterday" }
+  }
+}
+
+run "v3_candidate_with_approval_passes" {
+  command = plan
+
+  assert {
+    condition     = output.core_image_effective == var.enrollment_core_candidate.image
+    error_message = "Candidate with approval: the pinned image is rendered."
+  }
+}
+
+run "v3_live_image_needs_no_approval" {
+  command = plan
+
+  variables {
+    enrollment_core_candidate  = null
+    core_v3_db_change_approval = null
+    enrollment_secret_arn      = null
+    enrollment_tls_candidate = {
+      volume_names        = []
+      containers          = []
+      app_mount_points    = []
+      app_dependencies    = []
+      ecr_repository_arns = []
+      secret_arns         = []
+      kms_key_arns        = []
+      environment         = {}
+      app_port_mappings   = []
+    }
+  }
+
+  assert {
+    condition     = output.core_image_effective == var.core_runtime.image
+    error_message = "Live image: no approval is required and the live image is kept."
   }
 }

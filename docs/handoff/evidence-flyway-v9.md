@@ -140,3 +140,7 @@ Needed for a definitive answer (not used here):
 - Network path: a host inside the DEV VPC with TCP 5432 to `dev-shared` (the cluster is private; IAM database auth and the Data API are disabled per the RDS metadata). ECS Exec and one-off `run-task` are writes and are out of scope.
 - Credential owner: the DEV database owner, for a **read-only** role with `USAGE` on schemas `identity` and `public`, `SELECT` on the two `flyway_schema_history` tables, and `information_schema` access. The application secrets (`PLATFORM_IDENTITY_*` and Carelog datasource) are not to be used or read.
 - The Core and Carelog history tables must be read from the same database, `app`.
+
+## 7. 2026-11-24 B4: isolated rollback test (no new DEV evidence)
+
+The isolated Docker proof of the Core V3 rollback (`candidates/core-rollback-test/`, results in `evidence-core-rollback-test.md`) used only local PostgreSQL. It does not read or change DEV. No new DEV evidence was found: the DEV V3 and V9 status above is unchanged (V3 not applied as of the last recorded Core start, 2026-11-21 03:11Z; V9 unknown).

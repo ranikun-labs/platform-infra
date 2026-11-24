@@ -1,0 +1,6 @@
+# The runner writes all generated material to a mktemp directory and removes it on exit.
+# These patterns guard against a run that was interrupted before cleanup.
+core-rb.*/
+core-rb-docker.*/
+*.env
+work/

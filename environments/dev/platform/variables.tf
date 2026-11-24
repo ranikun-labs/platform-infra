@@ -136,3 +136,18 @@ variable "enrollment_secret_arn" {
   type        = string
   default     = null
 }
+
+# Documentation gate for the Flyway V3 migration of the candidate Core image (NOT proof of the database state).
+# The Core image 8353cec4 runs V3 at its first start (no off switch; prep-cert-secrets.md 10 and the
+# evidence-flyway-v9.md section 6). Required whenever the Core image differs from the live image, with the
+# enrollment flag on or off. Terraform only checks that the fields are present, that the reference is not a
+# placeholder, and that the time is ISO-8601. The reference is the approved change, and v3_state_checked_at is
+# when the read-only V3 status queries (carelog-tls-ecs-rollout-rollback.md section 8.1) were last run.
+variable "core_v3_db_change_approval" {
+  description = "Documentation gate, not proof: change reference and the time the read-only Flyway V3 status was checked. Required when the Core image differs from the live image."
+  type = object({
+    reference           = string
+    v3_state_checked_at = string
+  })
+  default = null
+}

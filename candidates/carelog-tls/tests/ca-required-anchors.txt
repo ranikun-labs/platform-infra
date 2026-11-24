@@ -1,0 +1,9 @@
+# Required trust anchors: must be present in BOTH stores (ISRG roots for the Upstash chain; Amazon and Starfield roots for AWS endpoints).
+# Format: <SHA-256 fingerprint><TAB><alias><TAB><subject CN>.
+18:CE:6C:FE:7B:F1:4E:60:B2:E3:47:B8:DF:E8:68:CB:31:D0:2E:BB:3A:DA:27:15:69:F5:03:43:B4:6D:B3:A4	cn_amazon_root_ca_3,o_amazon,c_us [jdk]	Amazon Root CA 3
+1B:A5:B2:AA:8C:65:40:1A:82:96:01:18:F8:0B:EC:4F:62:30:4D:83:CE:C4:71:3A:19:C3:9C:01:1E:A4:6D:B4	cn_amazon_root_ca_2,o_amazon,c_us [jdk]	Amazon Root CA 2
+2C:E1:CB:0B:F9:D2:F9:E1:02:99:3F:BE:21:51:52:C3:B2:DD:0C:AB:DE:1C:68:E5:31:9B:83:91:54:DB:B7:F5	cn_starfield_root_certificate_authority__g2,o_starfield_technologies__inc,l_scottsdale,st_arizona,c_us [jdk]	Starfield Root Certificate Authority - G2
+69:72:9B:8E:15:A8:6E:FC:17:7A:57:AF:B7:17:1D:FC:64:AD:D2:8C:2F:CA:8C:F1:50:7E:34:45:3C:CB:14:70	cn_isrg_root_x2,o_internet_security_research_group,c_us [jdk]	ISRG Root X2
+8E:CD:E6:88:4F:3D:87:B1:12:5B:A3:1A:C3:FC:B1:3D:70:16:DE:7F:57:CC:90:4F:E1:CB:97:C6:AE:98:19:6E	cn_amazon_root_ca_1,o_amazon,c_us [jdk]	Amazon Root CA 1
+96:BC:EC:06:26:49:76:F3:74:60:77:9A:CF:28:C5:A7:CF:E8:A3:C0:AA:E1:1A:8F:FC:EE:05:C0:BD:DF:08:C6	cn_isrg_root_x1,o_internet_security_research_group,c_us [jdk]	ISRG Root X1
+E3:5D:28:41:9E:D0:20:25:CF:A6:90:38:CD:62:39:62:45:8D:A5:C6:95:FB:DE:A3:C2:2B:0B:FB:25:89:70:92	cn_amazon_root_ca_4,o_amazon,c_us [jdk]	Amazon Root CA 4

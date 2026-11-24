@@ -33,6 +33,7 @@ The following rules hold for every step in this document, including rollback:
 5. Database precondition for the candidate app image: Flyway V9 is applied in DEV (`users.external_account_id` exists). Current status is **unknown**; see `docs/handoff/evidence-flyway-v9.md`. Verify with a read-only check owned by the DB owner. Without V9, the candidate app fails `ddl-auto: validate` at start.
 6. Flyway guard: the candidate app container carries `SPRING_FLYWAY_ENABLED=false` as a plain env (`task-fragments.json`, `carelog.tfvars.example`). Without it `dev-ecs-release.yml` (lines 131-133) blocks later image releases.
 7. IAM: the execution role boundary and policy allow the proxy ECR repository, `TLS_BUNDLE_JSON` (bundle ARN) and the enrollment secret for **execution** (ECS pulls secrets as the execution role). Terraform must produce this before registration (section 3).
+ 8. Core V3 gate: section 8.1 is complete (read-only V3 status recorded, approval reference recorded, runtime-versus-migration decision recorded) before ANY start of Core on 8353cec4, and Core desired count is 0 until then.
 
 ## 2. Build the candidate task definition from `:6`
 
@@ -176,6 +177,7 @@ Stop and escalate before the next step if any of these holds:
 - A candidate task definition has the enrollment ARN altered or re-typed, or any secret value appears in logs or plan output.
 - Health stays UNHEALTHY after `startPeriod` plus three retries (about 10 minutes): roll back (section 6).
 - The rollback itself does not stabilise on `:6` within the wait window: escalate; do not start new revisions.
+- Core is about to start on 8353cec4 and section 8.1 is not complete, or a Flyway V3 failure or partial V3 is seen.
 
 ## 8. Platform (Core and Gateway)
 
@@ -189,3 +191,37 @@ Rollback targets for the platform services in DEV (read-only facts, 2026-11-24):
 | Gateway `ranikun-platform-dev-gateway` | `:3` | `sha256:22267d151f3a4e88d85ce8bd7a0448d75a241fb9d82ecd943b4ca9280c61aa0f` | `sha256:1b00276e8e67e695f2753a6428fc576e351716c3687f22b9daf8e987508073d2` (same commit `dc635694…`) | Gateway `:3` keeps its cloudflared containers. Desired 0 now. |
 
 Core's candidate is not part of the Carelog rollout. Do not roll Core back as part of a Carelog incident unless the Core owner asks for it. The Core task revision rollback and its migration effects are the Core owner's procedure.
+
+### 8.1 Core V3 pre-start gate (mandatory for ANY start of Core on 8353cec4, enrollment on or off)
+
+Why: the candidate Core image runs Flyway migration V3 at its first start, with no switch to skip it (`IdentityPersistenceConfiguration.java:110-112` calls `IdentityLegacySchemaGuard.migrate`, which calls `flyway.migrate()` at `IdentityLegacySchemaGuard.java:31`; platform-services `dc63569`; see `docs/handoff/evidence-flyway-v9.md` sections 6.2-6.3). The last recorded Flyway state of the DEV `identity` schema is **version 2** (2026-11-21). Starting the candidate with enrollment off still applies V3. Desired count stays **0** until every step below is recorded.
+
+Steps (all read-only; the commands are listed here and are not run by this document):
+
+1. **Read-only V3 status.** Run by the DB owner with a read-only role. The application secrets are not used. Queries (database `app`):
+   ```sql
+   SELECT version, description, success, installed_on FROM identity.flyway_schema_history ORDER BY installed_rank DESC LIMIT 5;
+   SELECT column_name FROM information_schema.columns WHERE table_schema = 'identity' AND table_name = 'password_credentials' AND column_name = 'credential_revision';
+   SELECT to_regclass('identity.carelog_registration_operation') IS NOT NULL AS table_present;
+   ```
+   Expected before V3: top version `2` with `success` true; no `credential_revision` column; `table_present` false. Any other result is a stop (section 8.1 stop conditions).
+2. **Record** the result with the check time in UTC (ISO-8601). Both values become the input `core_v3_db_change_approval.v3_state_checked_at` and the reference below.
+3. **Approval.** An approved change id or URL is recorded as `core_v3_db_change_approval.reference`. Terraform checks only that the fields are present and not placeholders. It is a documentation gate, not proof of the database state. The DEV database owner and the Platform owner approve.
+4. **Migration role versus runtime role: what is verified and what is not.**
+   - Verified from the live task definition `ranikun-platform-dev-core:3` (environment and secret NAMES only): `PLATFORM_IDENTITY_DATASOURCE_USERNAME/PASSWORD` and `PLATFORM_IDENTITY_FLYWAY_DATASOURCE_USERNAME/PASSWORD` all reference the secret `ranikun/dev/shared-db-admin` (keys `username`, `password`). The live Core runtime, including its Flyway, therefore uses the shared database admin credential.
+   - Not verified: which role owns schema `identity` and its tables, and whether the admin credential is that owner.
+   - Consequence: the candidate runs V3 under the shared admin credential, so the runtime credential is effectively the owner. The candidate does not change this. The repository has no switch to run Flyway outside the application, so a **dedicated migration role or step needs a code change in platform-core** that is not done. Until it exists, the gate requires the DB owner's explicit decision to accept V3 under the shared admin credential. The ECS task and execution roles are not database principals; the database user comes only from the secret.
+5. **Desired count.** The Core service stays at `desiredCount` 0 until steps 1 to 4 are recorded and approved. Check with `describe-services` before any change.
+6. **Start.** One Core task definition on the candidate digest, with the trust-init wiring from the reviewed platform inputs. Watch the Core log stream for the Flyway lines (`Migrating schema "identity" to version "3"` and a success line). Then repeat step 1: version 3, `success` true, `credential_revision` present, `table_present` true. Record the result.
+
+Rollback implications:
+- Rolling back the Core image to `ad9f8428` (live `:3`) does **not** undo V3. The history keeps version 3, and the DDL is not reversed (same rule as section 6, Database).
+- Whether the live `:3` image starts with V3 already recorded in the history is **not verified**. It depends on how Flyway treats an applied migration with no local file. This must be tested on an isolated copy. The result belongs in `docs/handoff/evidence-core-rollback-test.md` (not yet present; link it only when it exists). Until then, treat a Core rollback after a V3 start as a possible Core outage.
+- Do not edit or delete V3 by hand as part of a rollback.
+
+Stop conditions (Core V3, in addition to section 7):
+- The step 1 result is not version 2 with `success` true before the start, or shows a partial V3 (column or table present without version 3).
+- No approval reference, or no check time, or a placeholder value.
+- The runtime-versus-migration question in step 4 has no owner decision.
+- `desiredCount` is not 0 before the gate passes.
+- A Flyway failure appears in the Core log: stop, do not restart in a loop, and escalate.

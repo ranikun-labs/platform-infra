@@ -258,3 +258,54 @@ RUN_AWS_SIM=1 TERRAFORM=<terraform 경로> sh candidates/carelog-tls/tests/run-a
 - 라이브 DEV state에 대한 plan은 실행하지 않았다(mock 기준). 실제 ECS 주입, Fargate, 실제 CA 체인, 앱 테스트, 역할 생성 후의 `simulate-principal-policy`는 하지 않았다.
 - 판단은 소스 `dc63569`와 이미지 태그 접두어에서 추정한 것이다(Dockerfile 출처 라벨 아님).
 - 정해야 할 것: 후보 Core의 V3 자동 적용 승인, DEV DB 읽기 전용 조회 담당과 경로, 공개 CA 번들 파일 커밋 담당, `DEV_CORE_TASK_IMAGE` 설정, 복구 담당 정책과 Deny 연결 승인(`prep-aws-changes.md` 11행), 가입에 `dev`가 정말 필요한지, 새 Carelog 이미지의 DEV 배포 승인자. Gateway 후보 `1b00276e…`는 발행·배포 상태만 확인했다.
+
+## 12. 3차 외부 리뷰 반영 (기준 17cf19e)
+
+AWS 쓰기, DEV DB 변경, Terraform apply, 새 Core 기동은 하지 않았다. 격리 테스트는 로컬 Docker에서만 했다.
+
+### 12.1 A · 가입 설정과 배포 절차
+- **가입 ON은 전부 갖춰야 plan이 통과한다** (`environments/dev/platform/core_env.tf`): Core 이미지 `8353cec4…`, digest 고정 trust-init(같은 digest 기반), `carelog-trust` 볼륨과 읽기 전용 마운트, `dependsOn` SUCCESS, trustStore 옵션, `dev` 프로필, 가입용 Secret 참조가 모두 있어야 한다. Core에 TLS 서버 번들 Secret이 들어가면 거부한다. 빠진 항목마다 이름만 보여 주며 실패하고 항목별 음성 테스트가 있다. 가입 OFF면 환경·Secret 이름과 개수가 라이브와 같다.
+- **가입 OFF여도 V3 관문**: Core 이미지가 라이브와 다르면 `core_v3_db_change_approval`(승인 근거와 V3 상태 확인 시각)이 필요하다. 비어 있거나 `REPLACE`로 시작하거나 시각 형식이 틀리면 plan이 실패한다. 이는 문서상의 관문이며 실제 승인의 증명이 아니다. 롤아웃 문서(`carelog-tls-ecs-rollout-rollback.md`)에 8.1절 "Core V3 pre-start gate"를 넣었다: 읽기 전용 V3 조회, 승인 기록, desired 0 유지, 롤백 영향, 중단 조건.
+- **후보 trustStore 충돌 거부**: 우리 옵션이 아닌 `trustStore`·비밀번호·형식, 같은 키의 서로 다른 값, `trustAll` 계열 패턴, `trustStore=NONE`은 plan 실패(키 이름만 출력). 인증서 폐기 확인 토글은 허용한다.
+- **구·신 Core CA 차이** (`prep-cert-secrets.md` 14·15절, `tests/ca-store-diff.sh`): 라이브 `ad9f84…` 118개, 후보 `8353cec4…` 117개. 차이는 라이브에만 있는 Izenpe 루트(CN Izenpe.com, 2037-12-13 만료) 하나이고 후보에만 있는 것은 없다. 원인은 JDK 21.0.13과 21.0.13.1로 추정(JDK 변경 이력은 확인하지 않음). ISRG X1·X2, Amazon Root CA 1~4, Starfield G2는 양쪽에 지문이 같다. 연결별 영향: Redis TLS(ISRG 체인)·RDS(`sslmode=require`, pgjdbc 문서 근거)·Carelog(HTTP/사설 CA)는 영향 없음, 나머지 연동은 현재 설정에 없다. 모든 외부 호스트를 조사하거나 라이브 로그를 읽지는 않았다. 테스트는 차이 목록이 `ca-expected-differences.txt`와 정확히 같을 때만 통과한다.
+
+### 12.2 B · 격리 PostgreSQL 롤백 실증 (`evidence-core-rollback-test.md`, `candidates/core-rollback-test/run.sh`)
+환경: PostgreSQL 16.15, 이전 Core `ad9f84…`(V1·V2), 새 Core `8353cec4…`(V3), 일회용 값. DEV DB에는 연결하지 않았다.
+
+| 단계 | 결과 |
+|---|---|
+| 1 이전 Core로 V1·V2 DB 준비 | PASS |
+| 2a 런타임 역할만으로 새 Core, V3 적용 전 | 기동 실패(예상), V3 적용 안 됨 |
+| 2a2 이력 조회 권한을 줘도 V3 보류 상태 | DDL 권한 부족으로 실패(예상) |
+| 2b 마이그레이션 역할로 새 Core | V3 적용(성공, 이력 1행) |
+| 2c·2c2 V3 후 런타임 역할 | 이력 조회 권한이 없으면 실패, 있으면 기동 |
+| 4a 새 Core 로그인·토큰 갱신·비밀번호 변경 | 200 / 200 / 정상 |
+| 3 V3가 있는 DB에 이전 Core, 기본 Flyway 설정 | **기동 성공** (차단되지 않음) |
+| 4b 이전 Core 로그인·토큰 갱신·비밀번호 변경 | 200 / 200 / 정상 |
+| 3 `ignore-migration-patterns=*:future` | 기동 성공 |
+| 3 `*:missing`만 지정해 기본값을 덮어쓰면 | 차단("Detected applied migration not resolved locally: 3") |
+| 5 새 Core 재전환 | V3 재실행 없음(같은 순번·체크섬), 데이터 건수 동일, 로그인 200 |
+| 5 가입 재시도 | **건너뜀** (가입 클라이언트는 https 또는 루프백만 허용, 격리 환경에 Carelog 가입 엔드포인트가 없음) |
+
+- **롤백 판정**: 이전 Core `ad9f84…`는 V3가 남은 DB에서 롤백 대상으로 쓸 수 있다(설정 변경 없이). 조건: (C1) 마이그레이션 데이터소스와 Flyway 기본 `*:future` 허용을 유지하고 `*:missing`만으로 덮어쓰지 않는다. (C2) Flyway가 런타임 역할로 돌면 그 역할에 `flyway_schema_history` SELECT가 필요하다(없으면 두 이미지 모두 실패). (C3) 롤백과 재전환에서 V3는 재실행되지 않는다. 이미지를 롤백해도 V3 스키마는 DB에 남는다.
+- **역할 구분 주의**: 격리 테스트는 마이그레이션 역할(스키마 소유자)과 런타임 역할(DML만)을 나눠 시험했다. 그러나 라이브 Core Task 정의는 런타임과 Flyway 자격 증명이 모두 `shared-db-admin`을 가리킨다(Task 정의 이름 기준). 따라서 라이브에서는 C1·C2가 관리자 자격 증명으로 충족되는 대신 런타임이 사실상 DB 소유자다. 역할 분리를 증명한 것이 아니며, 앱에는 Flyway를 앱 밖에서 실행하는 스위치가 없어 분리하려면 platform-core 변경이 필요하다. DEV의 실제 스키마 소유자·권한·`search_path`는 확인하지 못했다.
+- 코드 읽기만으로 확인한 것: 마이그레이션 때마다 런타임 역할의 `flyway_schema_history` 권한을 회수하는 코드(`IdentityRuntimeSchemaPrivileges.reconcile`)가 있다. 이번 실행에서 재확인하지는 않았다.
+
+### 12.3 재현 명령과 결과 (리드가 직접 실행)
+```
+export AWS_PROFILE=ranikun-admin MSYS_NO_PATHCONV=1
+bash candidates/core-rollback-test/run.sh          # 약 6분, Docker 필요, 이미지는 로컬에 있거나 ECR 읽기 전용 pull
+RUN_AWS_SIM=1 TERRAFORM=<terraform 경로> sh candidates/carelog-tls/tests/run-all.sh
+# 각 루트: terraform init -backend=false; fmt -check -recursive; validate; test
+```
+| 항목 | 결과 |
+|---|---|
+| `core-rollback-test/run.sh` | rc 0, 실패 0 (통과 19, 건너뜀 1, 테스트 컨테이너 잔여 없음) |
+| `run-all.sh` | OVERALL PASS rc 0, 단계 28 통과, 하위 검사 107 PASS / 0 FAIL (CA 차이 3건, IAM 시뮬레이션 27건 포함) |
+| Terraform test | carelog 10, platform 44, finance 1, shared 2 통과. 네 루트 `fmt`·`validate` 통과 |
+
+### 12.4 DEV에서 아직 확인할 항목
+- DEV DB의 Core V3·Carelog V9 적용 여부(현재 근거: V3 미적용은 2026-11-21 03:11Z 기준, V9 알 수 없음). 읽기 전용 계정과 접속 경로 필요, 조회 쿼리는 `evidence-flyway-v9.md`.
+- DEV 스키마 소유자, 런타임 역할의 권한, `search_path`, Flyway가 어떤 데이터소스로 도는지(라이브 Task 정의는 둘 다 `shared-db-admin`).
+- 실제 Aurora(TLS), 데이터 양에 따른 `ALTER TABLE` 잠금 시간, 가입 재시도(Carelog 가입 엔드포인트가 있는 환경), ALB·ECS 헬스·Secret 주입.
+- 결정: V3를 공유 관리자 자격 증명으로 실행해도 되는지, 승인 기록자와 위치(`core_v3_db_change_approval`), Izenpe 루트가 필요한 엔드포인트가 있는지.
