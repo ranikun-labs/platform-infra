@@ -1,0 +1,194 @@
+name: Dev integration dual-product E2E
+
+# Evidence job, not a standing regression guard. It is pinned to this branch's three added files relative to
+# INFRA_BASE, and to the exact codeload source trees below (each verified by git tree, fail-closed). After merge or
+# rebase the candidate no longer adds exactly those files, so the pin check fails closed by design. Re-pin before reuse.
+# One run boots platform-core (Carelog auth + Finance reference, DEV dual-auth), gateway-app, the REAL carelog-be
+# (prod profile) and finance-harness-be, then verifies through the Gateway.
+
+on:
+  push:
+    branches: [claude/great-heisenberg-u3i75y]
+    paths:
+      - .github/workflows/dev-integration-dual-product-e2e.yml
+      - scripts/e2e/run-dev-integration-dual-product-e2e.sh
+      - scripts/e2e/dev-integration-dual-product-e2e.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Pins. INFRA_BASE must be an ancestor of the candidate; the cumulative diff from it must be exactly the three owned
+# files, all added. Source trees are verified by git tree after download (fail-closed).
+# CARELOG_ENROLLMENT_TARGET=real: enrollment PUT and product-claims GET are answered by the real carelog-be.
+env:
+  INFRA_BASE: 090ae835d75f6519dd30762954e86449bf18ef02
+  CARELOG_SHA: 8bfad770b657f6460b0432b1e6ca17e4b2f9cf9e
+  CARELOG_TREE: d22fec812fa7d7fdf94118a694ef770c7d4b1db2
+  FINANCE_SHA: 8e6fe6013c0df70d728e6b0a99c2f5ca870892ea
+  FINANCE_TREE: e18c265eb82e635154b37958dca13b8ba9dfd217
+  PLATFORM_SERVICES_SHA: f9adfd3d338f482e7c2967512522e5b4e2354619
+  PLATFORM_SERVICES_TREE: dbbd2b215e9a2de4e43067d1ad699db6665bbde6
+  CARELOG_ENROLLMENT_TARGET: real
+
+concurrency:
+  group: dev-integration-dual-product-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dual-product-e2e:
+    if: github.repository == 'ranikun-labs/platform-infra'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:18.4-alpine3.24
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+      valkey:
+        image: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+        ports:
+          - 127.0.0.1:6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - name: Check out candidate with parent history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          # Full history so INFRA_BASE (an ancestor, not necessarily HEAD^) is present for the pin check.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record enrollment target and deviation policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CARELOG_ENROLLMENT_TARGET" = "real"
+          {
+            echo '## Dev integration dual-product E2E'
+            echo '- Target: `CARELOG_ENROLLMENT_TARGET=real`. Enrollment PUT and product-claims GET are served by the real carelog-be (prod profile). No stub.'
+            echo '- One Core: Carelog auth and Finance reference together with DEV dual-auth (`dev` profile + `PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED=true`).'
+            echo '- Deviations from DEV are listed under "Deviations" by the run step. Any setting not listed there was supplied as DEV would need it (see injection table).'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify platform-infra candidate pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fail-closed. No history rewrite: INFRA_BASE only has to be an ancestor of the candidate.
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
+            echo "FAIL-CLOSED: checked-out HEAD does not equal GITHUB_SHA."; exit 1; }
+          git merge-base --is-ancestor "$INFRA_BASE" HEAD || {
+            echo "FAIL-CLOSED: INFRA_BASE ($INFRA_BASE) is not an ancestor of the candidate."; exit 1; }
+          test -z "$(git diff --name-status "$INFRA_BASE" HEAD | awk '$1 != "A"')" || {
+            echo "FAIL-CLOSED: candidate modifies, renames or deletes files relative to INFRA_BASE."; exit 1; }
+          expected="$(printf '%s\n' \
+            .github/workflows/dev-integration-dual-product-e2e.yml \
+            scripts/e2e/dev-integration-dual-product-e2e.mjs \
+            scripts/e2e/run-dev-integration-dual-product-e2e.sh | sort)"
+          actual="$(git diff --name-only --no-renames "$INFRA_BASE" HEAD | sort)"
+          test "$actual" = "$expected" || {
+            echo "FAIL-CLOSED: candidate file set differs from the three owned E2E files."; exit 1; }
+          {
+            echo "infra_candidate_sha=$GITHUB_SHA"
+            echo "infra_candidate_tree=$(git rev-parse 'HEAD^{tree}')"
+            echo "infra_base_sha=$INFRA_BASE"
+          } >> "$GITHUB_ENV"
+
+      - name: Download and verify pinned source trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Each source is a codeload zip verified by git tree (computed in a bare repo, so no .git lands in the source).
+          # chmod +x for gradlew happens only after the tree check, so modes are never altered before verification.
+          fetch_pinned() {
+            local repo="$1" sha="$2" tree="$3" name="$4"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ && "$tree" =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL-CLOSED: $name pin is not 40-hex."; exit 1; }
+            local archive="$RUNNER_TEMP/$name.zip" unpack="$RUNNER_TEMP/$name-unpack" bare="$RUNNER_TEMP/$name-tree.git" src got
+            curl --fail --silent --show-error --location \
+              "https://codeload.github.com/ranikun-labs/$repo/zip/$sha" -o "$archive"
+            mkdir -p "$unpack"
+            unzip -q "$archive" -d "$unpack"
+            src="$(find "$unpack" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+            test -n "$src"
+            git init -q --bare "$bare"
+            git --git-dir="$bare" --work-tree="$src" add -f -A
+            got="$(git --git-dir="$bare" write-tree)"
+            test "$got" = "$tree" || { echo "FAIL-CLOSED: $name tree $got does not match pinned $tree."; exit 1; }
+            chmod +x "$src/gradlew" 2>/dev/null || true
+            printf '%s\n' "$src"
+          }
+          carelog_dir="$(fetch_pinned carelog-be "$CARELOG_SHA" "$CARELOG_TREE" carelog-be)"
+          finance_dir="$(fetch_pinned finance-harness-be "$FINANCE_SHA" "$FINANCE_TREE" finance-harness-be)"
+          platform_dir="$(fetch_pinned platform-services "$PLATFORM_SERVICES_SHA" "$PLATFORM_SERVICES_TREE" platform-services)"
+          {
+            echo "CARELOG_SOURCE_DIR=$carelog_dir"
+            echo "FINANCE_SOURCE_DIR=$finance_dir"
+            echo "PLATFORM_SOURCE_DIR=$platform_dir"
+          } >> "$GITHUB_ENV"
+          {
+            echo '### Pinned sources (tree verified)'
+            echo "- platform-infra candidate: \`$infra_candidate_sha\` (tree \`$infra_candidate_tree\`), base \`$infra_base_sha\` (ancestor)"
+            echo "- carelog-be: \`$CARELOG_SHA\` (tree \`$CARELOG_TREE\`); branch tip after lane A's idempotency-assert commit"
+            echo "- finance-harness-be: \`$FINANCE_SHA\` (tree \`$FINANCE_TREE\`)"
+            echo "- platform-services: \`$PLATFORM_SERVICES_SHA\` (tree \`$PLATFORM_SERVICES_TREE\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record DEV injection cross-check (evidence only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Static evidence from the repos at the pins above. NOT_VERIFIABLE means the value lives outside the repo.
+          {
+            echo '### DEV injection cross-check'
+            echo '| Setting this run needed | Status | Evidence |'
+            echo '|---|---|---|'
+            echo '| carelog `SPRING_PROFILES_ACTIVE=prod` | NOT_VERIFIABLE | compose sets it (`docker-compose.prod.yml:40`); DEV task env is `var.runtime.environment` (`environments/dev/carelog/main.tf:16`), tfvars not in repo |'
+            echo '| carelog `SPRING_FLYWAY_ENABLED=false` on the active container | NOT_VERIFIABLE (gate-enforced) | `dev-ecs-release.yml:131-133` blocks deploy unless the active container sets it explicitly |'
+            echo '| carelog `CARELOG_INTERNAL_IDENTITY_CLAIMS_ENABLED=true` | NOT_VERIFIABLE | Prod yml hardcodes `false` (`application-prod.yml:39`); env beats it. DEV value not in repo |'
+            echo '| carelog `CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET` | NOT_VERIFIABLE | Secrets Manager/SSM ref in `var.runtime.secrets` (`environments/dev/carelog/main.tf:17`), tfvars not in repo |'
+            echo '| carelog `CARELOG_IDENTITY_ENROLLMENT_ENABLED=true` | NOT_VERIFIABLE | Gate only in code (`EnrollmentController.java:21`); no yml default. DEV value not in repo |'
+            echo '| carelog `CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET` | NOT_VERIFIABLE | Same as above, secret ref in tfvars |'
+            echo '| carelog `GATEWAY_INTERNAL_SECRET` | NOT_VERIFIABLE | Required by `SecurityConfig.java:48`; secret ref in tfvars |'
+            echo '| carelog DB `SPRING_DATASOURCE_URL/USERNAME/PASSWORD` | NOT_VERIFIABLE | `docker-compose.prod.yml:44`; DEV values in tfvars/Secrets Manager |'
+            echo '| carelog `/run/secrets` configtree and `/run/rds-ca.pem` | NOT_VERIFIABLE (not declared by Terraform) | `application-prod.yml:3,16`; `modules/ecs-service/main.tf` declares no volumes; carelog Dockerfile creates neither path |'
+            echo '| carelog `VALKEY_TLS_ENABLED` | NOT_VERIFIABLE | Prod default true (`application-prod.yml:29`); DEV value not in repo |'
+            echo '| core `PLATFORM_CORE_PORT=8081` | INJECTED | `environments/dev/platform/services.tf:78` |'
+            echo '| gateway `PLATFORM_GATEWAY_PORT/MANAGEMENT_PORT/AUTH_URI` | INJECTED | `environments/dev/platform/services.tf:48-51` |'
+            echo '| core `PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL/CREDENTIAL` | NOT_VERIFIABLE | core env/secrets from `var.core_runtime` (`services.tf:8-9,23-24`), tfvars not in repo |'
+            echo '| core `PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL/SERVICE_SECRET` | NOT_VERIFIABLE | Same as above |'
+            echo '| core `PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED=true` + `dev` profile | NOT_INJECTED (documented) | `environments/dev/platform/README.md:5`: "no reference authentication is enabled here" |'
+            echo '| core `PLATFORM_IDENTITY_AUTH_ENABLED=true` | NOT_VERIFIABLE | Not in repo |'
+            echo '| gateway `PLATFORM_GATEWAY_FINANCE_BE_URI`, `PLATFORM_GATEWAY_CARELOG_REGISTRATION_ENABLED` | NOT_VERIFIABLE | `var.gateway_runtime.environment` (`services.tf:48`), tfvars not in repo |'
+            echo '| gateway trusted-context / finance reference JWT secrets | NOT_VERIFIABLE | `secrets` in tfvars; DEV finance trusted routing disabled per `environments/dev/finance/README.md:5` |'
+            echo '| carelog `CARELOG_ENVIRONMENT` (metrics tag) | NOT_VERIFIABLE | Compose default `production`; DEV value not in repo |'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # setup-java exports JAVA_HOME_17_X64 (carelog-be, Gateway) and JAVA_HOME_21_X64 (platform-core, Finance).
+      - name: Set up JDK 17 (carelog-be, Gateway) and JDK 21 (platform-core, Finance)
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            21
+
+      - name: Run dev integration dual-product E2E
+        shell: bash
+        run: >-
+          bash ./scripts/e2e/run-dev-integration-dual-product-e2e.sh
+          "$CARELOG_SOURCE_DIR"
+          "$FINANCE_SOURCE_DIR"
+          "$PLATFORM_SOURCE_DIR"
