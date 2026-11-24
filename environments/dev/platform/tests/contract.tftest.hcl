@@ -5,18 +5,19 @@ mock_provider "aws" {
 }
 
 variables {
-  aws_region             = "ap-northeast-2"
-  aws_account_id         = "111122223333"
-  name_prefix            = "test-dev"
-  vpc_id                 = "vpc-0123456789abcdef0"
-  private_subnet_ids     = ["subnet-0123456789abcdef0", "subnet-0123456789abcdef1"]
-  public_subnet_ids      = ["subnet-0123456789abcdef2", "subnet-0123456789abcdef3"]
-  cluster_arn            = "arn:aws:ecs:ap-northeast-2:111122223333:cluster/test-dev"
-  namespace_id           = "ns-0123456789abcdef0"
-  namespace_name         = "dev.internal"
-  certificate_arn        = "arn:aws:acm:ap-northeast-2:111122223333:certificate/11111111-1111-1111-1111-111111111111"
-  alb_ingress_cidrs      = ["192.0.2.0/24"]
-  gateway_readiness_path = "/actuator/health/readiness"
+  aws_region                 = "ap-northeast-2"
+  aws_account_id             = "111122223333"
+  name_prefix                = "test-dev"
+  vpc_id                     = "vpc-0123456789abcdef0"
+  private_subnet_ids         = ["subnet-0123456789abcdef0", "subnet-0123456789abcdef1"]
+  public_subnet_ids          = ["subnet-0123456789abcdef2", "subnet-0123456789abcdef3"]
+  cluster_arn                = "arn:aws:ecs:ap-northeast-2:111122223333:cluster/test-dev"
+  namespace_id               = "ns-0123456789abcdef0"
+  namespace_name             = "dev.internal"
+  certificate_arn            = "arn:aws:acm:ap-northeast-2:111122223333:certificate/11111111-1111-1111-1111-111111111111"
+  alb_ingress_cidrs          = ["192.0.2.0/24"]
+  gateway_public_alb_enabled = true
+  gateway_readiness_path     = "/actuator/health/readiness"
   gateway_runtime = {
     image                  = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     ecr_repository_arn     = "arn:aws:ecr:ap-northeast-2:111122223333:repository/gateway"

@@ -60,7 +60,8 @@ variables {
     health_check           = { command = ["CMD", "/test"], interval = 30, timeout = 5, retries = 3, start_period = 30 }
     log_retention_days     = 7
   }
-  enrollment_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-service-XXXXXX"
+  enrollment_secret_arn      = "arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-service-XXXXXX"
+  core_trust_init_pinned_ref = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
   enrollment_core_candidate = {
     image                = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf"
     trust_init_core_base = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf"
@@ -251,7 +252,7 @@ run "enabled_missing_trust_init_container_fails" {
 
 run "enabled_trust_init_not_digest_pinned_fails" {
   command         = plan
-  expect_failures = [terraform_data.enrollment_completeness]
+  expect_failures = [terraform_data.enrollment_completeness, terraform_data.core_trust_init_gate]
 
   variables {
     enrollment_tls_candidate = {

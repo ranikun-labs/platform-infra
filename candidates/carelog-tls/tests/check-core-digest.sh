@@ -60,7 +60,8 @@ if [ "${1:-}" = "--taskdef" ]; then
           | select(.containerName == "carelog-trust-init" and .condition == "SUCCESS")] | length == 1' \
     < "$TD" >/dev/null || fail "application container must depend on carelog-trust-init with condition SUCCESS"
   # Base label and layers of the local trust-init image against the application image (same checks as positional mode).
-  "$0" "$LOCAL_TRUST" "$APP_IMG" >/dev/null 2>&1 || fail "trust-init image base (label or layers) does not match the application image"
+  # Invoked through sh: the file is not executable in git (100644), so "$0" alone cannot re-run it.
+  sh "$0" "$LOCAL_TRUST" "$APP_IMG" >/dev/null 2>&1 || fail "trust-init image base (label or layers) does not match the application image"
   echo "check-core-digest: PASS rendered task definition matches the pinned Core digest, the pushed trust-init digest and its wiring"
   exit 0
 fi

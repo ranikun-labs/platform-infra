@@ -64,7 +64,7 @@ variable "tags" {
 variable "gateway_public_alb_enabled" {
   description = "When false, the public ALB, its target group, listener and related SG rules are not created (live DEV has none)."
   type        = bool
-  default     = true
+  default     = false
 }
 variable "gateway_additional_containers" {
   description = "Raw ECS container definitions added beside the Gateway application container (for example cloudflared sidecars)."
@@ -122,7 +122,7 @@ variable "enrollment_core_candidate" {
   default = null
 
   validation {
-    condition     = var.enrollment_core_candidate == null || can(regex("^[0-9]{12}\\.dkr\\.ecr\\.ap-northeast-2\\.amazonaws\\.com/ranikun/platform/core@sha256:[a-f0-9]{64}$", try(var.enrollment_core_candidate.image, "")))
+    condition     = var.enrollment_core_candidate == null || can(regex("^124495093425\\.dkr\\.ecr\\.ap-northeast-2\\.amazonaws\\.com/ranikun/platform/core@sha256:[a-f0-9]{64}$", try(var.enrollment_core_candidate.image, "")))
     error_message = "enrollment_core_candidate.image must be a digest reference to ranikun/platform/core (repo@sha256:<64 hex>)."
   }
   validation {
@@ -135,6 +135,19 @@ variable "enrollment_secret_arn" {
   description = "Existing enrollment bearer Secret ARN; null leaves enrollment disabled."
   type        = string
   default     = null
+}
+
+# Verified pushed trust-init digest for the Core candidate. Required when the candidate carries carelog-trust-init;
+# the Core baseline task definition is refused at plan time unless its init image equals this reference
+# (terraform_data.core_trust_init_gate in core_env.tf). Read it from the trust-init build summary, never from a tag.
+variable "core_trust_init_pinned_ref" {
+  description = "Pushed trust-init digest reference (core-trust-init@sha256:<64 hex>) that the Core candidate's init container must run."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.core_trust_init_pinned_ref == null || can(regex("^124495093425\\.dkr\\.ecr\\.ap-northeast-2\\.amazonaws\\.com/ranikun/platform/core-trust-init@sha256:[a-f0-9]{64}$", var.core_trust_init_pinned_ref))
+    error_message = "core_trust_init_pinned_ref must be a digest reference to ranikun/platform/core-trust-init in the DEV account."
+  }
 }
 
 # Documentation gate for the Flyway V3 migration of the candidate Core image (NOT proof of the database state).

@@ -18,6 +18,16 @@ on:
       test_sha:
         required: true
         type: string
+      core_v3_approval_ref:
+        description: "Reviewed change reference for the Core Flyway V3 migration. Required when the Core image changes."
+        required: false
+        default: ""
+        type: string
+      core_trust_init_ref:
+        description: "Pushed core-trust-init digest reference (DEV account). Required when the rendered task definition carries carelog-trust-init."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -85,6 +95,11 @@ jobs:
       cancel-in-progress: false
     environment: dev-${{ inputs.service }}-deploy
     steps:
+      # The deploy-time digest check is a repository script; run the same SHA the tests validated.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.test_sha }}
+          persist-credentials: false
       - uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
         with:
           role-to-assume: ${{ vars.DEV_DEPLOYER_ROLE_ARN }}
@@ -101,6 +116,8 @@ jobs:
           CONTAINER: ${{ vars.DEV_ECS_CONTAINER }}
           FAMILY: ${{ vars.DEV_ECS_TASK_FAMILY }}
           IMAGE: ${{ needs.publish.outputs.image }}
+          CORE_V3_APPROVAL_REF: ${{ inputs.core_v3_approval_ref }}
+          CORE_TRUST_INIT_REF: ${{ inputs.core_trust_init_ref }}
         run: |
           set -Eeuo pipefail
           [[ "$ACCOUNT" =~ ^[0-9]{12}$ && -n "$CLUSTER" && -n "$SERVICE" && -n "$CONTAINER" && -n "$FAMILY" && -n "$REPOSITORY" ]]
@@ -125,7 +142,10 @@ jobs:
             ([.taskDefinition.containerDefinitions[] | select(.name == $container) | .image | split("@")[0] | split(":")[0]] == [$repository])
           ' <<<"$task" >/dev/null
           # Database migrations must run separately; rolling back an image cannot reverse DDL.
-          if [[ "$WORKLOAD" != gateway ]]; then
+          # Carelog and Finance: the active container must set SPRING_FLYWAY_ENABLED=false.
+          # Core is excluded: its Flyway runs at every startup with no property switch (evidence-flyway-v9.md 6.3),
+          # so a Core image change is gated below by the V3 approval and the trust-init digest check instead.
+          if [[ "$WORKLOAD" != gateway && "$WORKLOAD" != core ]]; then
             if ! jq -e --arg container "$CONTAINER" '
               [.taskDefinition.containerDefinitions[] | select(.name == $container) |
                (([.environment[]? | select(.name == "SPRING_FLYWAY_ENABLED" and .value == "false")] | length) == 1 and
@@ -144,6 +164,26 @@ jobs:
             with_entries(select(.value != null)) |
             .containerDefinitions |= map(if .name == $container then .image = $image else . end)
           ' <<<"$task" > "$RUNNER_TEMP/task-definition.json"
+          # Registration gate, immediately before register-task-definition, on the exact file that is registered.
+          rendered="$RUNNER_TEMP/task-definition.json"
+          previous_image=$(jq -r --arg container "$CONTAINER" '[.taskDefinition.containerDefinitions[] | select(.name == $container)][0].image' <<<"$task")
+          trust_check=false
+          if [[ "$WORKLOAD" == core && "$IMAGE" != "$previous_image" ]]; then
+            # A Core image change applies Flyway V3 at its first start, and this workflow cannot roll that back.
+            [[ -n "$CORE_V3_APPROVAL_REF" ]] || { echo "Deploy blocked: a Core image change needs core_v3_approval_ref (Flyway V3 runs at first start)" >&2; exit 1; }
+            trust_check=true
+          fi
+          if jq -e 'any(.containerDefinitions[]?; .name == "carelog-trust-init")' "$rendered" >/dev/null; then
+            trust_check=true
+          fi
+          if [[ "$trust_check" == true ]]; then
+            [[ "$CORE_TRUST_INIT_REF" == "${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/ranikun/platform/core-trust-init@sha256:"* && "${CORE_TRUST_INIT_REF##*@sha256:}" =~ ^[a-f0-9]{64}$ ]] \
+              || { echo "Deploy blocked: core_trust_init_ref must be a DEV core-trust-init digest reference" >&2; exit 1; }
+            aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
+            docker pull "$CORE_TRUST_INIT_REF" >/dev/null
+            # Fails before any registration unless the rendered task definition is the pinned Core digest with the pushed trust-init wiring.
+            sh candidates/carelog-tls/tests/check-core-digest.sh --taskdef "$rendered" "$CORE_TRUST_INIT_REF" "$CORE_TRUST_INIT_REF"
+          fi
           candidate=$(aws ecs register-task-definition --cli-input-json "file://$RUNNER_TEMP/task-definition.json" --query 'taskDefinition.taskDefinitionArn' --output text)
           [[ "$candidate" == "arn:aws:ecs:${REGION}:${ACCOUNT}:task-definition/${FAMILY}:"* ]]
           # Recheck just before update to avoid overwriting a release that started meanwhile.

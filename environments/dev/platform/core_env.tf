@@ -5,7 +5,7 @@
 #   PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED is "true" (trimmed, case-insensitive).
 # - Candidate OFF: the candidate inputs are NOT passed to the module at all (containers, volumes, mounts,
 #   dependencies, ECR and KMS ARNs, secret ARNs, port mappings, env, enrollment secret). The task definition
-#   inputs equal the live inputs plus PLATFORM_CORE_PORT (test: core_gate_regression.tftest.hcl).
+#   inputs equal the live inputs plus PLATFORM_CORE_PORT (test: core_gate.tftest.hcl).
 # - The Core image is the candidate digest whenever enrollment_core_candidate is set, even with the flag off.
 #   That independent switch requires the V3 documentation gate (core_v3_db_change_approval).
 # - Candidate ON, all-or-nothing (completeness gate, enrollment_completeness): registration true, enrollment
@@ -153,7 +153,7 @@ locals {
   enrollment_base_expect  = "https://${var.carelog_enrollment_host}:8443"
   enrollment_base_url_ok  = local.enrollment_base_url == local.enrollment_base_expect
   enrollment_arn_ok = var.enrollment_secret_arn == null ? false : can(regex(
-    "^arn:aws:secretsmanager:ap-northeast-2:[0-9]{12}:secret:ranikun/dev/carelog/enrollment-service-[A-Za-z0-9]{6}$",
+    "^arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-service-[A-Za-z0-9]{6}$",
     var.enrollment_secret_arn,
   ))
   enrollment_in_exec      = var.enrollment_secret_arn == null ? false : contains(local.core_exec_secret_arns, var.enrollment_secret_arn)
@@ -312,6 +312,24 @@ output "core_spring_profiles_active" {
 output "core_java_tool_options" {
   description = "Effective JAVA_TOOL_OPTIONS for Core (null when unset). Contains no credentials."
   value       = lookup(local.core_environment, "JAVA_TOOL_OPTIONS", null)
+}
+
+# Registration gate (plan time) for the trust-init container: the Core candidate must carry exactly one
+# carelog-trust-init container whose image is the verified pushed digest (core_trust_init_pinned_ref). Checks 1 to 7
+# of check-core-digest.sh are enforced here (the input completeness gate covers most of them); the base label and layers
+# need Docker and stay in that script (docs/handoff/carelog-tls-ecs-rollout-rollback.md section 8.2).
+resource "terraform_data" "core_trust_init_gate" {
+  count = length(local.core_gate_containers) > 0 ? 1 : 0
+  input = "core-trust-init-gate"
+
+  lifecycle {
+    precondition {
+      condition = var.core_trust_init_pinned_ref != null && length([for c in local.core_gate_containers : c if try(c.name, "") == "carelog-trust-init"]) == 1 && alltrue([
+        for c in local.core_gate_containers : try(c.image, "") == var.core_trust_init_pinned_ref if try(c.name, "") == "carelog-trust-init"
+      ])
+      error_message = "carelog-trust-init must be exactly one container whose image equals core_trust_init_pinned_ref (the pushed, verified digest). The Core task definition is not registered."
+    }
+  }
 }
 
 output "core_image_effective" {
