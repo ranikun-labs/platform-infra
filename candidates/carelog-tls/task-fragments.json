@@ -29,14 +29,25 @@
         ],
         "secrets": [
           {
-            "name": "TLS_CERT_PEM",
-            "valueFrom": "REPLACE_WITH_CERT_SECRET_ARN"
-          },
-          {
-            "name": "TLS_KEY_PEM",
-            "valueFrom": "REPLACE_WITH_PRIVATE_KEY_SECRET_ARN"
+            "name": "TLS_BUNDLE_JSON",
+            "valueFrom": "REPLACE_WITH_SERVER_BUNDLE_SECRET_ARN"
           }
-        ]
+        ],
+        "logConfiguration": {
+          "logDriver": "awslogs",
+          "options": {
+            "awslogs-group": "/ecs/ranikun-carelog-dev-api",
+            "awslogs-region": "ap-northeast-2",
+            "awslogs-stream-prefix": "tls-proxy"
+          }
+        },
+        "healthCheck": {
+          "command": ["CMD-SHELL", "kill -0 $(cat /run/nginx.pid) || exit 1"],
+          "interval": 30,
+          "timeout": 3,
+          "retries": 3,
+          "startPeriod": 10
+        }
       }
     ],
     "appContainerAddition": {
@@ -45,6 +56,14 @@
         {
           "value": "127.0.0.1",
           "name": "SERVER_ADDRESS"
+        },
+        {
+          "value": "true",
+          "name": "CARELOG_IDENTITY_ENROLLMENT_ENABLED"
+        },
+        {
+          "value": "false",
+          "name": "SPRING_FLYWAY_ENABLED"
         }
       ]
     }
@@ -64,12 +83,6 @@
           "sourceVolume": "carelog-trust",
           "containerPath": "/run/carelog-trust",
           "readOnly": false
-        }
-      ],
-      "secrets": [
-        {
-          "name": "CARELOG_CA_PEM",
-          "valueFrom": "REPLACE_WITH_CA_SECRET_ARN"
         }
       ]
     },

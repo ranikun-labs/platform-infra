@@ -121,8 +121,33 @@ Before moving it to `.github/workflows/`: check that the action SHA pins are sti
 
 1. The proxy master process runs as root (needed to write the task volume and to bind). Workers run as `nginx`. Acceptable for DEV? Alternative is a pre-created volume owned by a non-root UID, which needs a task-definition `user` and an ECS volume-ownership check.
 2. The Core base image runs as root by default. This is pre-existing and not changed here.
-3. CA rotation: `trust-init.sh` imports one certificate from `CARELOG_CA_PEM`. A PEM bundle with two CAs was **not tested**. Rotation needs either a single-CA window or a bundle import. Test before relying on it.
+3. CA rotation: **resolved in section 9** (multi-CA bundle import tested; the CA is baked into the image, so rotation is an image rebuild plus Core rollout). Section 2 and section 4 describe the earlier single-CA state (`CARELOG_CA_PEM`), which is superseded.
 4. The server certificate SAN must include the Cloud Map name the Core uses: `ranikun-carelog-dev-api.dev.internal` (taken from `platform.tfvars.example`). The local test used `carelog.test`.
 5. The Dockerfile HEALTHCHECK is local only. The task definition needs an explicit container `healthCheck` (for example `CMD-SHELL kill -0 $(cat /run/nginx.pid)`), to be reviewed with the task fragment.
 6. Fargate sizing of the sidecar: see `prep-aws-changes.md`.
 7. The `ECS_CONTAINER_METADATA_URI_V4/task` lookup takes the first IPv4 across all containers. With `awsvpc`, all containers share the task IP, so this is correct. It was not tested on Fargate.
+
+## 9. Update 2026-11-24: 1-secret design, CA baked into trust-init (tested)
+
+| File | Change | Reason |
+| --- | --- | --- |
+| `Dockerfile` | `apk add jq=1.8.2-r0 openssl=3.3.7-r2` (openssl pinned, the nginx base has no CLI) | Fail-fast certificate/key pair check in the entrypoint |
+| `proxy-entrypoint.sh` | Accepts `TLS_BUNDLE_JSON` (keys `tls_certificate`, `tls_private_key`, one secret) or the 3-secret `TLS_CERT_PEM`/`TLS_KEY_PEM`. Compares SPKI hashes of cert and key; mismatch removes the files and exits 1 without printing values. The bundle variable is unset after parsing | Version-skew safety and the 1-secret design |
+| `Dockerfile.trust` | `ARG CA_BUNDLE_SRC` (no default, so a build without it fails). `COPY` the public PEM bundle to `/usr/local/share/carelog/carelog-dev-ca-bundle.pem`. Bundle is a build input, never a secret | CA baked in; public material |
+| `trust-init.sh` | Reads the baked bundle (`CARELOG_CA_BUNDLE` overrides the path for tests). Splits the bundle, imports each certificate under its own alias, refuses non-CA certificates (`CA:TRUE` check), and requires the store to grow by exactly the number of certificates. No secret env var | Multi-CA bundle (rotation overlap) and no CA secret |
+| `.github/workflows-draft/dev-carelog-tls-images.yml` | New step checks that `candidates/carelog-tls/ca/carelog-dev-ca-bundle.pem` exists, contains a certificate, and has no private key. Trust build passes `CA_BUNDLE_SRC=ca/carelog-dev-ca-bundle.pem` | CA as build input. The step fails closed until the public CA is committed |
+
+Tests run (2026-11-24, throwaway material, Docker Desktop 29.7.2):
+
+| Test | Command | Result |
+| --- | --- | --- |
+| Entrypoint pair check, 7 cases (1-secret match/mismatch/no key, 3-secret match/skew/unrelated key, no input) | `bash private/prep2-platform/test-entrypoint-pair.sh` | PASS (7 of 7) |
+| trust-init store growth and JDK client, 1-CA and 2-CA bundles, CA1 and CA2 leaves, wrong name, default-only store | `bash private/prep2-platform/test-jdk-trust.sh` | PASS (7 of 7) |
+| Leaf-only bundle refused; build without `CA_BUNDLE_SRC` fails | `docker build` / `trust-init` runs | PASS |
+| hadolint (`Dockerfile`, `Dockerfile.trust` with the documented ignores) | `hadolint/hadolint:latest` | PASS (rc 0) |
+| shellcheck (`trust-init.sh`, `proxy-entrypoint.sh`, `-s sh`) | `koalaman/shellcheck:stable` | PASS (rc 0) |
+| actionlint (draft workflow) | `rhysd/actionlint:latest` | PASS (rc 0) |
+
+Store numbers: default store 117 entries; 1 CA -> 118; 2 CAs -> 119; 2 `carelog-dev-ca-*` aliases; 117 default aliases preserved.
+
+Not run: `terraform fmt/validate/test` (no Terraform file in `environments/dev/platform` was changed). No image was pushed; the local tags `carelog-tls-proxy:prep2` and `carelog-trust-prep2:{1,2,leaf,nocert}` are local only.

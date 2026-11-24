@@ -5,7 +5,8 @@ FROM nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a
 ARG SOURCE_SHA=unknown
 LABEL org.opencontainers.image.revision=$SOURCE_SHA \
       org.opencontainers.image.title="carelog-tls-proxy"
-RUN apk add --no-cache jq=1.8.2-r0
+# openssl is used only by the entrypoint to compare certificate and key public keys (fail-fast pair check).
+RUN apk add --no-cache jq=1.8.2-r0 openssl=3.3.7-r2
 COPY nginx.conf /etc/nginx/templates/carelog.conf
 COPY proxy-entrypoint.sh /usr/local/bin/carelog-proxy
 RUN chmod 755 /usr/local/bin/carelog-proxy \

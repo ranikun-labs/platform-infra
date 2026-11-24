@@ -141,3 +141,39 @@ ECR repo `ranikun/carelog/tls-proxy`, `ranikun/platform/core-trust-init`와 dige
 
 ### 8.6 알 수 없는 것
 `:5`·`:6`을 누가 등록했는지, DEV DB의 V9 적용 여부, enrollment Secret ARN의 `:key::` 접미사 형식과 Core·Carelog의 Secret 공유 여부, Core 보안 그룹의 8081 인바운드 출처.
+
+## 9. 2026-11-24 2차: 1-secret 안 반영과 Task 설정 반영
+
+기준은 ef9a3e1이다. AWS 쓰기는 하지 않았다(승인 대기). 새 plan은 만들지 않았다(실제 이미지·Secret 참조가 없다).
+
+### 9.1 Secret 3개 → 1개 (상세: `prep-cert-secrets.md`, `prep-aws-changes.md`, `prep-iam-boundary.md`)
+- **1개 안**: 서버 인증서·키를 Secret 하나(JSON `tls_certificate`, `tls_private_key`)에 두고 프록시는 `TLS_BUNDLE_JSON` 하나로 읽는다. CA 공개 인증서는 Core trust-init 이미지에 빌드 인자로 넣는다(`CA_BUNDLE_SRC`, 비밀 아님). 가입용 Bearer Secret은 그대로다.
+- **비용(서울, 2026-11-24 Price List API)**: Secrets Manager $0.40/secret-월 + $0.05/1만 호출, ECR $0.10/GB-월, CMK $1.00/키-월. 3개 안 월 약 $1.33, 1개 안 월 약 $0.52(CMK 없이). 차이는 월 $1 미만이라 비용이 결정 요인이 아니다.
+- **권한**: Core는 TLS Secret을 읽지 않는다(서버 키 읽기 거부 유지). Carelog는 번들과 enrollment만 읽는다. boundary v4 시뮬레이션 12건 중 12건이 기대와 일치했다. 변경은 Carelog와 Core 실행 boundary 두 곳이다.
+- **교체·갱신**: 인증서 갱신은 `PutSecretValue` 한 번 + 새 배포. 3개 안은 인증서와 키가 다른 버전에서 읽혀 짝이 어긋날 수 있었고(ECS는 `valueFrom`을 따로 읽음) 1개 안은 읽기 한 번이라 어긋날 수 없다. CA 교체는 이미지 재빌드와 Core 롤아웃이 필요하다(2-CA 번들 테스트함). CA를 Secret으로 둬야 하면 3개 안으로 돌아가며 프록시 엔트리포인트는 두 방식을 모두 지원한다.
+- **롤백**: 이전 Secret 버전 또는 이전 Task 정의 revision(Carelog `:6`, Core·Gateway `:3`).
+- 반영한 파일: `proxy-entrypoint.sh`, `trust-init.sh`(다중 CA 가져오기, CA:TRUE 검사), `Dockerfile.trust`, `task-fragments.json`, `carelog.tfvars.example`, `platform.tfvars.example`, 초안 워크플로.
+
+### 9.2 Carelog Task 설정 반영
+- `CARELOG_IDENTITY_ENROLLMENT_ENABLED=true`, `SPRING_FLYWAY_ENABLED=false`, 프록시 `logConfiguration`·`healthCheck`를 후보 입력에 넣었다. `app_port_mappings=[]`(앱 포트 매핑 없음)을 확인했다. 모듈 변경은 필요 없다.
+- `nginx.conf`에 `merge_slashes off`를 넣었다. `//api/...` 경로가 허용 위치로 통과하는 문제를 테스트가 찾았다.
+- Flyway: `SPRING_FLYWAY_ENABLED`가 `spring.flyway.enabled`에 바인딩되어 yml보다 우선하고, 릴리스 가드(`dev-ecs-release.yml` 131~135행)는 이 변수만 읽는다(`evidence-flyway-v9.md`). 라이브 입력에 `CARELOG_FLYWAY_ENABLED=false`와 `SPRING_PROFILES_ACTIVE=prod`가 있어야 한다.
+- **DEV DB의 V9: 알 수 없음.** 로그·RDS 메타데이터·GitHub run에 마이그레이션 흔적이 없다. 미적용으로 보고 계획한다. 확정하려면 DEV VPC 안에서 읽기 전용 계정으로 `SELECT version, success FROM flyway_schema_history ORDER BY installed_rank DESC LIMIT 5;`를 실행해야 한다(Secret과 접속 경로 필요, 하지 않았다).
+
+### 9.3 테스트 결과 (로컬, 합친 코드 기준)
+| 항목 | 결과 |
+|---|---|
+| `test-proxy.sh` (프록시 이미지 재빌드) | PASS, 65건 |
+| 프록시 인증서·키 짝 검사(1개 안·3개 안, 어긋남·키 없음·무관한 키·입력 없음) | 7/7 PASS |
+| trust-init + Core 이미지 JDK 클라이언트 (CA 1개·2개, 기본 CA 유지, 잘못된 이름 거부, init 없으면 거부) | 7/7 PASS, 저장소 항목 117→118(1 CA)·117→119(2 CA) |
+| Terraform fmt / validate / test: carelog, platform, finance, shared | 전부 통과 (4, 2, 1, 2건) |
+| hadolint, shellcheck, actionlint | 통과 |
+
+위 둘째·셋째 테스트 스크립트는 비공개 경로와 런타임에 만든 일회용 인증서를 쓰므로 저장소에 넣지 않았다. 재현이 필요하면 `prep-cert-secrets.md`의 테스트 설명을 따라 다시 작성한다.
+검증하지 못한 것: 실제 ECS Secret 주입, Fargate 메타데이터 IP, 실제 CA 체인(ECDSA), Spring Boot 앱 테스트(JDK 없음), 프록시 healthCheck의 리스너 확인(nginx 마스터 프로세스만 확인).
+
+### 9.4 AWS 쓰기 승인 요청 (`prep-aws-changes.md` 2번 표, 아직 실행하지 않음)
+ECR repo 2개, Secret 1개, boundary v4 두 곳, OIDC 발행 역할, GitHub environment, 배포 역할의 Terraform apply, 선택 사항 CMK. 월 비용 약 $0.52(CMK 시 약 $1.52). 입력이 모두 필요하다: 두 repo의 이미지 digest, 번들 Secret ARN(접미사 포함), 공개 CA 번들 파일(`candidates/carelog-tls/ca/carelog-dev-ca-bundle.pem`), boundary 담당자.
+
+### 9.5 열린 질문
+CA 오프라인 서명 담당, CA 이미지 포함에 대한 보안 수락 여부, CMK 요구 여부, boundary 담당자, DEV DB V9 적용 여부, 새 Carelog 이미지의 DEV 배포 승인자.

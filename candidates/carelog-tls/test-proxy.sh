@@ -14,6 +14,10 @@ TASK_IPV4=127.0.0.2 envsubst '${TASK_IPV4}' </etc/nginx/templates/carelog.conf >
 nginx -t
 busybox-extras httpd -p 127.0.0.1:8080 -h /tmp/backend
 nginx
+# ECS container healthCheck in task-fragments.json / carelog.tfvars.example runs exactly this on the proxy container.
+kill -0 "$(cat /run/nginx.pid)" && echo "ok   healthCheck kill -0 nginx pid"
+head -c 4000 /dev/zero | tr '\0' a >/tmp/body-4000
+head -c 5000 /dev/zero | tr '\0' a >/tmp/body-5000
 
 fail=0
 # code <curl args...>: prints the HTTP status, or 000 when no response was received.
@@ -61,6 +65,10 @@ reaches_backend "DELETE user" -X DELETE "$H/api/v1/users/$ID"
 want_code 404 "GET Core claims" "$H/api/v1/internal/identity/claims/$ID"
 want_code 404 "GET Core claims with query" "$H/api/v1/internal/identity/claims/$ID?trace=1"
 want_code 404 "GET health" "$H/api/v1/health"
+# HEAD is allowed wherever GET is (nginx limit_except GET implies HEAD); the method set is otherwise exact.
+reaches_backend "HEAD customers (implied by GET)" -I "$H/api/v1/users/customers"
+# Host header does not select a route: the 8080 listener is reached only from Gateway/Core security groups.
+reaches_backend "GET customers with foreign Host header" -H "Host: attacker.invalid" "$H/api/v1/users/customers"
 
 echo "== 8080 denied (method, path, encoding and normalization variants)"
 want_code 403 "DELETE customers (method)" -X DELETE "$H/api/v1/users/customers"
@@ -81,6 +89,14 @@ want_code 403 "root" "$H/"
 want_code 403 "actuator on app port" "$H/actuator/health"
 want_code 403 "rag route" "$H/rag/anything"
 want_code 403 "auth route (Core owns it)" -X POST "$H/api/v1/auth/login"
+want_code 403 "OPTIONS customers (method not in list)" -X OPTIONS "$H/api/v1/users/customers"
+want_code 403 "OPTIONS enrollment on 8080" -X OPTIONS "$H$ENR"
+want_code 403 "uppercase prefix (regex is case-sensitive)" "$H/API/V1/users/customers"
+want_code 403 "trailing slash on collection" "$H/api/v1/users/customers/"
+want_code 403 "double slash prefix (merge_slashes off)" "$H//api/v1/users/customers"
+want_code 403 "double slash enrollment on 8443" $TLS -X PUT "https://carelog.test:8443//api/v1/internal/v1/identity/carelog/enrollments/$ID"
+want_code 403 "encoded id segment with slash (%2F)" "$H/api/v1/users/customers/a%2Fb"
+want_code 403 "claims with trailing dot-segment" "$H/api/v1/internal/identity/claims/$ID/."
 
 echo "== 8443 enrollment only (TLS, matching CA and hostname)"
 reaches_backend "PUT enrollment" $TLS -X PUT "$S$ENR"
@@ -89,6 +105,13 @@ want_code 403 "PUT customers on 8443" $TLS -X PUT "$S/api/v1/users/customers"
 want_code 403 "PUT enrollment with ;" $TLS -X PUT "$S$ENR;x"
 want_code 403 "PUT enrollment dot-dot" $TLS -X PUT "$S$ENR/../../../users/customers"
 want_code 403 "PUT claims on 8443" $TLS -X PUT "$S/api/v1/internal/identity/claims/$ID"
+want_code 403 "HEAD enrollment on 8443" $TLS -I "$S$ENR"
+want_code 403 "OPTIONS enrollment on 8443" $TLS -X OPTIONS "$S$ENR"
+want_code 403 "PATCH enrollment on 8443" $TLS -X PATCH "$S$ENR"
+want_code 403 "root on 8443" $TLS "$S/"
+# Enrollment body limit is 4 KB: 4000 bytes reaches the backend, 5000 bytes is refused by nginx with 413.
+reaches_backend "PUT enrollment, 4000-byte body" $TLS -X PUT --data-binary @/tmp/body-4000 "$S$ENR"
+want_code 413 "PUT enrollment, 5000-byte body" $TLS -X PUT --data-binary @/tmp/body-5000 "$S$ENR"
 if curl -sS --noproxy '*' --resolve wrong.test:8443:127.0.0.2 --cacert /tmp/ca.crt https://wrong.test:8443/ >/dev/null 2>&1; then
   echo "FAIL wrong hostname accepted"; fail=1
 else echo "ok   wrong hostname rejected"; fi

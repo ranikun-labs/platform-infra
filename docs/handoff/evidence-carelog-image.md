@@ -62,3 +62,34 @@ Verdict (ii): **no evidence that anyone approved deploying `sha256:2630045e…` 
 - Is V9 applied to the DEV database? (Needs read access to `flyway_schema_history` or the schema; not attempted.)
 - Is there an approval outside GitHub and AWS metadata (chat, ticket) for DEV deployment of `2630045e…`? None is recorded in the repositories checked.
 - ECR scan result for `2630045e…` was not available at publish time; current scan status was not queried.
+
+## 8. 2026-11-24 candidate task configuration corrections (no AWS writes)
+
+Changes made to the candidate inputs (TLS secret and certificate references untouched):
+
+| Item | Change | File |
+| --- | --- | --- |
+| (a) enrollment flag | `CARELOG_IDENTITY_ENROLLMENT_ENABLED=true` added to the app env in `task-fragments.json` (it was already in the tfvars example). Terraform merges `enrollment_tls_candidate.environment` into the app `environment` (`environments/dev/carelog/main.tf` `local.app_environment`) and the output `app_environment` exposes it for tests. | `candidates/carelog-tls/task-fragments.json`, `carelog.tfvars.example`, `environments/dev/carelog/main.tf`, `outputs.tf`, `tests/contract.tftest.hcl` |
+| (b) proxy logConfiguration | `awslogs`, group `/ecs/ranikun-carelog-dev-api`, region `ap-northeast-2`, stream prefix `tls-proxy`. | same as above |
+| (c) proxy healthCheck | `CMD-SHELL` `kill -0 $(cat /run/nginx.pid) || exit 1`, interval 30, timeout 3, retries 3, startPeriod 10. Mirrors the Dockerfile HEALTHCHECK, which ECS ignores. Verified in the built image (§9). | same as above |
+| (d) app portMappings | `app_port_mappings = []` (already in tfvars; added to fragment context). Tests assert the value reaching the module is an explicit empty list. Module `modules/ecs-service/main.tf` line 128 emits 8080 only when the value is null. | tests |
+| Flyway | `SPRING_FLYWAY_ENABLED=false` added as a plain env in both files (the guard in `dev-ecs-release.yml` lines 131-133 requires it). Details in `evidence-flyway-v9.md`. | `task-fragments.json`, `carelog.tfvars.example` |
+| nginx | `merge_slashes off;` in both server blocks (found by §9 test). | `candidates/carelog-tls/nginx.conf` |
+
+Test results:
+
+| Command | Result |
+| --- | --- |
+| `docker build -t carelog-dev-tls-candidate:local candidates/carelog-tls` | exit 0 (rebuilt after nginx change) |
+| `docker run ... carelog-dev-tls-candidate:local /tmp/test-proxy.sh` (test-proxy.sh mounted) | exit 0, PASS, 65 ok, 0 FAIL |
+| `terraform.exe fmt -check -recursive environments/dev/carelog` | exit 0 (after `fmt` on `tests/contract.tftest.hcl`) |
+| `terraform.exe init -backend=false -input=false` then `validate` | Success, configuration valid |
+| `terraform.exe test` in `environments/dev/carelog` | Success, 4 passed, 0 failed |
+| `terraform console -var-file` on the merged tfvars (scratch copy without backend) | evaluates as expected (see §10 of evidence-8080-api.md) |
+
+Module changes needed: none for (a)-(d). The module passes raw containers and env through. Optional hardening only: change the module default for `app_port_mappings` from null to `[]` (not done; would change the module, which is out of scope).
+
+Known gaps not closed here:
+- Proxy healthCheck checks the nginx master process, not that the listeners answer. A listener-level check needs a path that the proxy allows (for example `GET /api/v1/health` through 8080 would hit the app and fail while the app is starting, so it was not chosen).
+- Terraform plan against real DEV state and the protected inputs was not run (needs protected inputs and backend access; lead's step).
+- `environments/dev/carelog/.terraform.lock.hcl` was already modified in the worktree before this work (`git status`), and `terraform init` may touch it again. Not committed by this task.

@@ -62,12 +62,21 @@ jobs:
           digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$ref")"
           echo "PROXY_IMAGE=${digest}" >> "$GITHUB_ENV"
 
+      - name: Check public CA bundle (build input, never a secret)
+        run: |
+          set -euo pipefail
+          bundle=candidates/carelog-tls/ca/carelog-dev-ca-bundle.pem
+          test -s "$bundle" || { echo "$bundle is missing: commit the PUBLIC CA certificate(s) first" >&2; exit 1; }
+          grep -q 'BEGIN CERTIFICATE' "$bundle"
+          if grep -q 'PRIVATE KEY' "$bundle"; then echo "CA bundle contains a private key; refusing" >&2; exit 1; fi
+
       - name: Build and push trust-init (from Core digest)
         run: |
           set -euo pipefail
           ref="$ECR_REGISTRY/$INIT_REPO:git-$GITHUB_SHA"
           docker build --pull --provenance=false --sbom=false \
             --build-arg CORE_IMAGE="$CORE_IMAGE" \
+            --build-arg CA_BUNDLE_SRC=ca/carelog-dev-ca-bundle.pem \
             --build-arg SOURCE_SHA="$GITHUB_SHA" \
             -f candidates/carelog-tls/Dockerfile.trust -t "$ref" candidates/carelog-tls
           docker push "$ref"

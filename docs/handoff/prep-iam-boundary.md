@@ -2,6 +2,10 @@
 
 Status: **proposal only.** No IAM policy, role, or version was created, changed, or attached. Read-only calls only (`get-policy`, `get-policy-version`, `get-role`, `simulate-principal-policy`, `simulate-custom-policy`). Policy documents are not secrets. The saved copies are under the private scratch directory.
 
+**Update 2026-11-24: boundary v4 for the 1-secret design (section 9) supersedes the 3-secret TLS statements in sections 4 and 5 where they differ.** Carelog reads one bundle secret; Core reads no TLS secret (the CA is baked into the trust-init image). The existing 3-secret statements are kept below for the fallback.
+
+Note: the random six-character suffix of the enrollment secret ARN is shown as XXXXXX; use the real ARN from Secrets Manager metadata.
+
 ## 1. Current boundaries (read-only)
 
 | Boundary policy (customer managed, path `/dev-boundary/`) | Default version | Allowed now (summary) | Used by role |
@@ -155,3 +159,63 @@ The pattern test uses a sample suffix. The real suffixes are only known after cr
 1. Who owns the `dev-boundary` policies, and does a change need an extra approver?
 2. Is `enrollment-service` needed by both roles? Today neither boundary allows it, so the enrollment path is blocked regardless of TLS.
 3. Is a CMK required by the security review? If yes, add the KMS statements above and re-run the offline simulation.
+
+## 8. Carelog TLS 3-secret vs 1-secret: boundary impact
+
+| Statement (boundary) | 3-secret (sections 4 and 5) | 1-secret (section 9) |
+| --- | --- | --- |
+| Carelog `TlsProxyImagePull` (`ranikun/carelog/tls-proxy`) | Same | Same |
+| Carelog `TlsProxySecretsRead` | `server-cert-??????`, `server-key-??????`, enrollment-service | **Replaced** by `TlsProxyBundleRead`: `server-bundle-??????` (one resource), enrollment-service kept |
+| Core `TlsTrustInitImagePull` (`ranikun/platform/core-trust-init`) | Same | Same |
+| Core `TlsCaSecretRead` (`ca-cert-??????`, enrollment-service) | Present | **Removed**. Core keeps only the enrollment-service read (`EnrollmentServiceRead`) |
+| Secret ARNs allowed to Core | enrollment-service + CA | enrollment-service only |
+| Secret ARNs allowed to Carelog | enrollment-service + cert + key | enrollment-service + bundle (bundle contains the key, the same trust boundary as before) |
+| Secrets to create | 3 (`server-cert`, `server-key`, `ca-cert`) | 1 (`server-bundle`) |
+| Secret ARN patterns in IAM | 3 TLS patterns | 1 TLS pattern |
+| Rotation of IAM | Only if a secret name changes | Only if the bundle name changes. Secret value rotation needs no IAM change |
+
+Required outcome checked: Carelog cannot read the CA (none exists in this design), Core cannot read the server key (the bundle is denied to Core).
+
+## 9. Boundary v4 for the 1-secret design (simulation, read-only)
+
+Files (private scratch, not in Git): `private/prep2-platform/v4-1secret-carelog-exec.json` and `v4-1secret-core-exec.json` (built from the current v3 documents in `private/prep-platform/`, adding statements only). The simulation used `aws iam simulate-custom-policy` with the wrapped policy arrays (`*.arr.json`). Sample suffixes (`AbCdEf`) stand in for the real 6-character suffix.
+
+Statements added to the Carelog boundary (`ranikun-carelog-dev-api-execution`, v4):
+
+```json
+[
+  {"Sid":"TlsProxyImagePull","Effect":"Allow","Action":["ecr:BatchCheckLayerAvailability","ecr:BatchGetImage","ecr:GetDownloadUrlForLayer"],"Resource":"arn:aws:ecr:ap-northeast-2:124495093425:repository/ranikun/carelog/tls-proxy"},
+  {"Sid":"TlsProxyBundleRead","Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":["arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-tls/server-bundle-??????"]},
+  {"Sid":"EnrollmentServiceRead","Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-service-XXXXXX"}
+]
+```
+
+Statements added to the Core boundary (`ranikun-platform-dev-core-execution`, v4):
+
+```json
+[
+  {"Sid":"TlsTrustInitImagePull","Effect":"Allow","Action":["ecr:BatchCheckLayerAvailability","ecr:BatchGetImage","ecr:GetDownloadUrlForLayer"],"Resource":"arn:aws:ecr:ap-northeast-2:124495093425:repository/ranikun/platform/core-trust-init"},
+  {"Sid":"EnrollmentServiceRead","Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-service-XXXXXX"}
+]
+```
+
+Simulation results (EvalDecision, `simulate-custom-policy`, 2026-11-24):
+
+| Boundary | Action and resource | Expected | Result |
+| --- | --- | --- | --- |
+| Carelog | ECR `ranikun/carelog/api` (control) | allowed | allowed |
+| Carelog | ECR `ranikun/carelog/tls-proxy` | allowed | allowed |
+| Carelog | secret `server-bundle-AbCdEf` | allowed | allowed |
+| Carelog | secret `enrollment-service-XXXXXX` | allowed | allowed |
+| Carelog | secret `ca-cert-AbCdEf` (must deny) | implicitDeny | implicitDeny |
+| Carelog | secret `shared-identity/jwt` (control) | allowed | allowed |
+| Core | ECR `ranikun/platform/core` (control) | allowed | allowed |
+| Core | ECR `ranikun/platform/core-trust-init` | allowed | allowed |
+| Core | secret `server-bundle-AbCdEf` (must deny: server key) | implicitDeny | implicitDeny |
+| Core | secret `ca-cert-AbCdEf` (no CA secret) | implicitDeny | implicitDeny |
+| Core | secret `enrollment-service-XXXXXX` | allowed | allowed |
+| Core | ECR `ranikun/carelog/tls-proxy` (must deny) | implicitDeny | implicitDeny |
+
+Result: 12 of 12 match the expectation. Simulation covers boundary documents only. The Terraform inline policy (`terraform-*`) is separate and is generated from `execution_secret_arns` and `additional_ecr_repository_arns` (`environments/dev/platform/services.tf`, `environments/dev/carelog/main.tf`). Re-check the real ARNs with `simulate-principal-policy` after the secret exists.
+
+Owner, cost and rollback: as in section 3 (new policy version, `SetDefaultPolicyVersion`, rollback to v3). Two boundaries, each with v1-v3 today, so v4 fits the 5-version limit.

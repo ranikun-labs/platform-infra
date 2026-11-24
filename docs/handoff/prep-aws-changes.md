@@ -1,44 +1,66 @@
 # AWS changes required for the Carelog DEV TLS candidate (prep, nothing executed)
 
-Account 124495093425, ap-northeast-2. Every row is **not executed**. Costs are assumptions dated 2026-11-24 (see `prep-cert-secrets.md`). "Sidecar Fargate" is an upper bound: it applies only if the task size must grow.
+Account 124495093425, ap-northeast-2. Every row is **not executed**. Prices are from the AWS Price List API on 2026-11-24 (see `prep-cert-secrets.md` section 6). "Sidecar Fargate" is an upper bound, applies only if the task size must grow, and is an assumption.
 
-| # | AWS change | Target resource | Required permission (who makes it) | One-time cost | Monthly cost (assumed) | Who / when |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | Create ECR repo `ranikun/carelog/tls-proxy` (IMMUTABLE, scan on push, AES256, keep last 10) | `arn:aws:ecr:ap-northeast-2:124495093425:repository/ranikun/carelog/tls-proxy` | `ecr:CreateRepository`, `ecr:PutLifecyclePolicy` (ranikun-admin: allowed in simulation) | $0 | ~$0.01 storage | Platform owner, before first image push |
-| 2 | Create ECR repo `ranikun/platform/core-trust-init` (same settings) | `arn:aws:ecr:ap-northeast-2:124495093425:repository/ranikun/platform/core-trust-init` | same as 1 | $0 | ~$0.10 storage | Platform owner, before first image push |
-| 3 | Create OIDC publish role `ranikun-dev-carelog-tls-image-publish` (trust: repo `ranikun-labs/platform-infra`, environment `dev-carelog-tls-publish`) | IAM role (new) | `iam:CreateRole`, `iam:PutRolePolicy` (admin) | $0 | $0 | Platform owner, before the workflow is enabled |
-| 4 | Create GitHub environment `dev-carelog-tls-publish` with required reviewers; set vars `AWS_REGION`, `DEV_ECR_REGISTRY`, `DEV_TLS_IMAGE_PUBLISHER_ROLE_ARN` | GitHub repo settings | Repo admin | $0 | $0 | Repo admin, before enabling workflow |
-| 5 | Move `.github/workflows-draft/dev-carelog-tls-images.yml` to `.github/workflows/` | Repo file | PR merge (lead) | $0 | $0 | Lead, after 1 to 4 |
-| 6 | Create secret `ranikun/dev/carelog/enrollment-tls/server-cert` (PEM, plaintext) | Secrets Manager (new ARN with suffix) | `secretsmanager:CreateSecret`, `secretsmanager:PutSecretValue` (admin: allowed) | $0 | $0.40 | Security/operator, after cert is signed offline |
-| 7 | Create secret `ranikun/dev/carelog/enrollment-tls/server-key` (PEM, plaintext) | Secrets Manager (new ARN) | same as 6 | $0 | $0.40 | same as 6 |
-| 8 | Create secret `ranikun/dev/carelog/enrollment-tls/ca-cert` (CA certificate only, never the key) | Secrets Manager (new ARN) | same as 6 | $0 | $0.40 | same as 6 |
-| 9 | Create policy version v4 for `dev-boundary/ranikun-carelog-dev-api-execution` (add TLS proxy ECR pull and two secret ARNs) | IAM customer managed policy | `iam:CreatePolicyVersion`, `iam:SetDefaultPolicyVersion` (admin: allowed in simulation). Owner: boundary owner | $0 | $0 | Boundary owner, before Terraform apply for Carelog |
-| 10 | Create policy version v4 for `dev-boundary/ranikun-platform-dev-core-execution` (add trust-init ECR pull, CA secret, enrollment secret) | IAM customer managed policy | same as 9 | $0 | $0 | Boundary owner, before Terraform apply for Platform |
-| 11 | Add `ranikun/dev/carelog/enrollment-service` to both boundaries (if not already covered by 9 and 10) | Covered in 9 and 10 | same as 9 | $0 | $0 | Boundary owner (decision required, see prep-iam-boundary.md) |
-| 12 | Terraform apply `environments/dev/carelog`: inline execution policy gets the new ECR and secret ARNs; SG rule for 8443 from Core SG; new containers in the task | IAM inline policy `terraform-*`, security group rule, new task revision | Terraform deployer role (not ranikun-admin) | $0 | $0 | Deployer, after 6 to 10 and a reviewed plan |
-| 13 | Terraform apply `environments/dev/platform`: same for the Core execution role and the init container | same as 12 | Terraform deployer role | $0 | $0 | Deployer, after 6 to 10 and a reviewed plan |
-| 14 | Register the reviewed Carelog task definition revision (proxy + app + volume, `dependsOn` none) and update the service through the rollout path | ECS task definition family `ranikun-carelog-dev-api`, service `ranikun-carelog-dev-api` | `ecs:RegisterTaskDefinition`, `ecs:UpdateService` (deployer) | $0 | Sidecar Fargate, upper bound ~$11 per task if task CPU/memory must grow from 0.25 vCPU / 0.5 GB (assumed Seoul Fargate rates, unverified). Likely $0 if current size is enough | Release owner, per `carelog-tls-ecs-rollout-rollback.md` |
-| 15 | Register the reviewed Platform Core task definition revision (init container with `dependsOn` SUCCESS, shared volume read-only for app) and update the service | ECS task definition family for `ranikun-platform-dev-core`, service of same name | `ecs:RegisterTaskDefinition`, `ecs:UpdateService` (deployer) | $0 | Init container runs once per task start, no steady-state cost. Sidecar Fargate: none (init is not running after exit) | Release owner, same rollout as 14 |
-| 16 | Publish images: push `ranikun/carelog/tls-proxy:git-<sha>` and `ranikun/platform/core-trust-init:git-<sha>`, record digests | ECR (rows 1 and 2) | Publisher role from row 3 (`ecr:PutImage` and related) | $0 | Included in rows 1 and 2 | Publisher workflow, after row 4 approval |
-| 17 | Optional: customer managed KMS key for the three secrets (only if the security review requires it) | KMS key (new) + key policy | `kms:CreateKey`, `kms:CreateAlias`, `kms:PutKeyPolicy` (admin: allowed in simulation). Then `kms:Decrypt` in rows 9 and 10 | $0 | ~$1.00 | Security owner, before row 6 if chosen |
-| 18 | Optional: enable ECR image scanning findings gate in the publish workflow | Workflow (repo file) | None (read only) | $0 | $0 | Lead, after first scan results |
-| 19 | No change: ACM certificate, ACM PCA, ALB/ingress for the TLS path | n/a | n/a | $0 | $0 | Not needed for internal 8443 |
+Status of this document: it is the **approval request** for AWS writes. AWS write scope is not approved yet. Nothing in this document may run until that approval is given.
 
-## Totals (assumed)
+## 1. Recommended design: 1-secret bundle, CA baked into the trust-init image
+
+Differences from the 3-secret design (`prep-cert-secrets.md`) are in section 4.
+
+## 2. Approval request: resource list (AWS writes)
+
+| # | Resource (type) | Target ARN pattern | Action needed (who) | Permission scope for the change | One-time cost | Monthly cost (Seoul, assumed usage) | Owner, when |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | ECR repository `ranikun/carelog/tls-proxy` (IMMUTABLE, scan on push, AES256, lifecycle keep last 10) | `arn:aws:ecr:ap-northeast-2:124495093425:repository/ranikun/carelog/tls-proxy` | `ecr:CreateRepository`, `ecr:PutLifecyclePolicy`, `ecr:PutImageScanningConfiguration` (platform owner) | Create only this repository | $0 | about $0.01 (75 MB) | Platform owner, before first push |
+| 2 | ECR repository `ranikun/platform/core-trust-init` (same settings) | `arn:aws:ecr:ap-northeast-2:124495093425:repository/ranikun/platform/core-trust-init` | same as 1 | Create only this repository | $0 | about $0.10 (749 MB image, shared layers unknown) | Platform owner, before first push |
+| 3 | Secret `ranikun/dev/carelog/enrollment-tls/server-bundle` (JSON with `tls_certificate`, `tls_private_key`; AWS managed key) | `arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-tls/server-bundle-??????` | `secretsmanager:CreateSecret` on that name, `secretsmanager:PutSecretValue` on that name (operator, once per renewal) | Only this secret name. No read permission is needed to create it. **No `GetSecretValue` for anyone outside the Carelog execution role** | $0 | $0.40 | Security/operator, after the leaf is signed offline |
+| 4 | Boundary v4 `dev-boundary/ranikun-carelog-dev-api-execution` | IAM customer managed policy (`arn:aws:iam::124495093425:policy/dev-boundary/ranikun-carelog-dev-api-execution`) | `iam:CreatePolicyVersion`, `iam:SetDefaultPolicyVersion` (boundary owner) | Add `TlsProxyImagePull`, `TlsProxyBundleRead`, `EnrollmentServiceRead` (see `prep-iam-boundary.md` section 9) | $0 | $0 | Boundary owner, before Carelog Terraform apply |
+| 5 | Boundary v4 `dev-boundary/ranikun-platform-dev-core-execution` | `arn:aws:iam::124495093425:policy/dev-boundary/ranikun-platform-dev-core-execution` | same as 4 | Add `TlsTrustInitImagePull`, `EnrollmentServiceRead`. **No TLS secret** | $0 | $0 | Boundary owner, before Platform Terraform apply |
+| 6 | OIDC publish role `ranikun-dev-carelog-tls-image-publish` (trust: `ranikun-labs/platform-infra`, environment `dev-carelog-tls-publish`) | `arn:aws:iam::124495093425:role/ranikun-dev-carelog-tls-image-publish` | `iam:CreateRole`, `iam:PutRolePolicy` (platform admin) | ECR push to rows 1 and 2 only, ECR pull of `ranikun/platform/core` (build base). No Secrets Manager, KMS, IAM or ECS | $0 | $0 | Platform owner, before the workflow is enabled |
+| 7 | GitHub environment `dev-carelog-tls-publish` (required reviewers), vars `AWS_REGION`, `DEV_ECR_REGISTRY`, `DEV_TLS_IMAGE_PUBLISHER_ROLE_ARN` | GitHub repo settings (not AWS) | Repo admin | n/a | $0 | $0 | Repo admin |
+| 8 | Terraform apply `environments/dev/carelog` (inline `terraform-*` execution policy, SG rule 8443 from Core SG, new proxy container, task revision) | IAM inline policy of `ranikun-carelog-dev-api-execution`; ECS task family `ranikun-carelog-dev-api`; SG | Deployer role (not ranikun-admin): `iam:PutRolePolicy` on the execution role, `ecs:RegisterTaskDefinition`, `ecs:UpdateService`, `ec2:AuthorizeSecurityGroupIngress` | Scoped to the two services | $0 | Sidecar Fargate upper bound about $11 per task if CPU/memory must grow (assumption, not verified). Likely $0 | Deployer, after rows 1 to 5 and reviewed plan |
+| 9 | Terraform apply `environments/dev/platform` (Core init container, no CA secret) | Core execution inline policy; ECS task family `ranikun-platform-dev-core` | Deployer role, as row 8 | Scoped to the Core services | $0 | $0 (init runs once per task start) | Deployer, after rows 1, 2, 5 |
+| 10 | Optional: CMK for the bundle secret (only if the security review requires it) | KMS key (new, alias) | `kms:CreateKey`, `kms:CreateAlias`, `kms:PutKeyPolicy` (security owner). Then `kms:Decrypt` in rows 4 and 5 | Key policy limited to the two execution roles with `kms:ViaService` | $0 | $1.00 per key-month + $0.03 per 10,000 requests | Security owner, before row 3 |
+
+Not requested: ACM, ACM Private CA, ALB/ingress changes, any read of secret values, any change to existing secrets, any change to the existing enrollment Bearer secret (`ranikun/dev/carelog/enrollment-service-XXXXXX`, read-only use only).
+
+Target ARN patterns use `??????` for the 6-character random Secrets Manager suffix. The real ARN (with suffix) is known only after row 3. Terraform inputs need the full ARN.
+
+## 3. Totals (assumed usage, Seoul list prices 2026-11-24)
 
 | Scenario | One-time | Monthly |
 | --- | --- | --- |
-| Recommended (rows 1 to 16, no CMK) | $0 | About $1.35 for 3 secrets and ECR, plus Fargate only if task size grows (upper bound about $11 per running task) |
-| With optional CMK (row 17) | $0 | About $2.35 |
-| If ACM PCA were chosen instead (rejected) | $0 | About $400 per CA plus per-cert fees |
+| Recommended (1-secret, rows 1 to 9, no CMK) | $0 | about $0.52 (one secret $0.40, API about $0.005, ECR about $0.11). Plus Fargate only if the task size grows |
+| Same with CMK (row 10) | $0 | about $1.52 |
+| 3-secret fallback (rows 3 and 4 become three secrets and a 3-secret boundary) | $0 | about $1.33 |
 
-## Blocking inputs still missing (need AWS writes)
+## 4. 3-secret vs 1-secret: cost, permissions, replacement and rotation
 
-- Repository digests for `ranikun/carelog/tls-proxy` and `ranikun/platform/core-trust-init` (row 16).
-- Secret ARNs with suffixes for the three TLS secrets (rows 6 to 8). The Terraform inputs need them.
-- Confirmation of the boundary owner for rows 9 to 11.
-- Real `terraform plan` against the DEV state with the TLS inputs. Not run here, because it needs protected inputs.
+| Topic | 3-secret | 1-secret (recommended) |
+| --- | --- | --- |
+| Secrets to create (row 3) | 3 (`server-cert`, `server-key`, `ca-cert`) | 1 (`server-bundle`) |
+| Monthly secret charge | $1.20 | $0.40 |
+| Secret API calls per task start | 3 (proxy 2, Core 1) | 1 (proxy 1, Core 0) |
+| Carelog boundary (row 4) | Cert + key ARN patterns + enrollment | Bundle ARN pattern + enrollment |
+| Core boundary (row 5) | CA ARN pattern + enrollment | enrollment only; no TLS secret |
+| Core can read the server key? | No (denied) | No (denied; bundle is a different ARN) |
+| Carelog can read the CA? | No (denied) | Not applicable (no CA secret) |
+| Trust-init image | Generic, CA read at start | Built per CA (`CA_BUNDLE_SRC`), digest pinned |
+| Leaf renewal | Two `PutSecretValue` calls (cert and key) that must land as a pair; skew possible | One `PutSecretValue` (pair in one version); then force a Carelog deployment |
+| CA rotation | Secret change (`PutSecretValue` on `ca-cert`) and Core restart | New trust-init image build, Core rollout (two-CA bundle tested) |
+| Replacement if a secret is deleted | Two or three ARNs in Terraform | One ARN in Terraform |
+| Rollback | Previous secret version (`AWSPREVIOUS`) for each of the three; TD revision | Previous version of one secret; TD revision |
+| Version pinning | Needs version-id per entry (TD revision per rotation) | Not needed: one read per start |
 
-## Ordering
+## 5. Ordering
 
-6 to 8 and 9 to 11 (in any order) -> 1 and 2 -> 3 and 4 -> 5 -> 16 -> 12 and 13 -> 14 and 15. Terraform plan must show no-op for the existing resources before apply, as in the preserve handoff.
+Rows 3, 4, 5 and 10 (if chosen) in any order -> rows 1 and 2 -> row 6 and 7 -> image publish (digest recorded in `prep-images.md`) -> rows 8 and 9 -> task definition rollout (`carelog-tls-ecs-rollout-rollback.md`). Terraform plan must show no change for existing resources before apply.
+
+## 6. Blocking inputs still missing (need AWS writes)
+
+- Repository digests for `ranikun/carelog/tls-proxy` and `ranikun/platform/core-trust-init`.
+- Real ARN (with suffix) of `server-bundle`.
+- The real public CA bundle `candidates/carelog-tls/ca/carelog-dev-ca-bundle.pem` committed by its owner (the draft workflow fails closed without it).
+- Boundary owner for rows 4 and 5.
+- Real `terraform plan` against DEV state with the TLS inputs. Not run here (needs protected inputs).

@@ -12,13 +12,12 @@ enrollment_tls_candidate = {
   app_mount_points = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
   app_dependencies = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
   ecr_repository_arns = ["REPLACE_WITH_INIT_ECR_REPOSITORY_ARN"]
-  secret_arns = ["REPLACE_WITH_CA_SECRET_ARN"]
+  secret_arns = [] # CA public certificate is baked into the trust-init image; no CA secret.
   kms_key_arns = [] # Add only applicable customer-managed KMS key ARNs.
   containers = [{
     name = "carelog-trust-init"
     image = "REPLACE_WITH_INIT_IMAGE_BY_SHA256"
     essential = false
-    mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }]
-    secrets = [{ name = "CARELOG_CA_PEM", valueFrom = "REPLACE_WITH_CA_SECRET_ARN" }]
+    mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }]
   }]
 }

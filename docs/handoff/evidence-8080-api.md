@@ -107,3 +107,33 @@ Limits: the stub returns 404/501 for all paths, so this shows routing and method
 - Core's enrollment client refuses a non-loopback `http://` base URL, so the candidate must use an `https://` name that matches the sidecar certificate SAN. The current candidate test uses `carelog.test`; the real DNS name is not decided.
 - `test-proxy.sh` is tracked with git mode `100644` (`git ls-files -s`), but it is executable on disk. The README runs it through `sh`, so this does not block it.
 - The DEV `:6` task definition has 6 secrets (claims service secret, JWT, DB user and password, Redis password, gateway internal secret). None of them are TLS or enrollment secrets.
+
+## 9. 2026-11-24 rerun against the rebuilt proxy image and corrections
+
+Command (same as §4; image rebuilt from the current `candidates/carelog-tls` tree, digest of the local build not pinned):
+
+```sh
+docker build -t carelog-dev-tls-candidate:local candidates/carelog-tls
+MSYS_NO_PATHCONV=1 docker run --rm --entrypoint sh \
+  -v "<worktree>/candidates/carelog-tls/test-proxy.sh:/tmp/test-proxy.sh:ro" \
+  carelog-dev-tls-candidate:local /tmp/test-proxy.sh
+```
+
+Result: exit 0, `PASS: 8080 allowlist, 8443 enrollment-only, method, encoding and TLS checks`, 65 `ok` lines, 0 `FAIL`. Output saved outside the repo (private scratch).
+
+Failure found and fixed in this round:
+- `//api/v1/users/customers` on 8080 returned 404 (reached an allowed location). Cause: nginx `merge_slashes` (default on) normalized the double slash before location matching, and the unnormalized request was forwarded to Tomcat. Fix: `merge_slashes off;` in both server blocks of `nginx.conf`. The double-slash case on 8080 and the 8443 enrollment path now return 403.
+
+Cases added to `test-proxy.sh` (all pass):
+- 8080: HEAD on a GET route reaches the backend (nginx `limit_except GET` also allows HEAD); OPTIONS on a collection and on the enrollment path is 403; uppercase prefix, trailing slash, double slash, `%2F` in an id segment, and a `/.` suffix are 403; a foreign `Host:` header does **not** change routing (documented: the 8080 listener is only reachable from Gateway and Core security groups, so app authentication is the boundary).
+- 8443: HEAD, OPTIONS, PATCH and `/` are 403; a 4000-byte PUT reaches the backend; a 5000-byte PUT returns 413 (`client_max_body_size 4k`).
+- ECS healthCheck: `kill -0 $(cat /run/nginx.pid)` run in the image: exit 1 before nginx starts, 0 while running, 1 after `nginx -s stop`. `/run/nginx.pid` is the path in the image (`/var/run` is a symlink to `../run`).
+
+Not covered: the stub returns 404/501 for every path, so this still shows routing and method handling only. Real Carelog responses and Tomcat's treatment of encoded forms remain untested (no JDK on this host).
+
+## 10. Task definition configuration checks (2026-11-24)
+
+- `environments/dev/carelog`: `terraform fmt -check -recursive` (exit 0 after formatting the test file), `init -backend=false`, `validate` (valid), `test` (4 passed, 0 failed). New runs: `enrollment_candidate_app_env_and_port_mappings` (app `portMappings` is an explicit `[]`, app env includes `CARELOG_IDENTITY_ENROLLMENT_ENABLED=true`, `SPRING_FLYWAY_ENABLED=false`, `SERVER_ADDRESS=127.0.0.1`, no secret-named keys) and `unset_app_port_mappings_is_null_module_default` (documents that a null value makes the module emit containerPort 8080 for the app).
+- `carelog.tfvars.example` parses with the merged required inputs (scratch copy, `terraform console`): `app_port_mappings` = `[]`, app env as above, proxy `healthCheck.command` = `["CMD-SHELL", "kill -0 $(cat /run/nginx.pid) || exit 1"]`, `logConfiguration` stream prefix `tls-proxy`.
+- Module path: `modules/ecs-service/main.tf` line 123 (`container_definitions = jsonencode(concat([...], var.additional_containers))`) passes candidate containers through raw, so the proxy's `logConfiguration` and `healthCheck` must be in the candidate input (done). The awslogs group `/ecs/ranikun-carelog-dev-api` equals the module's `aws_cloudwatch_log_group.service` name (`"/ecs/${var.name}"`), and the execution role already allows `logs:CreateLogStream`/`PutLogEvents` on it. No module change needed.
+- The TLS secret references and certificate/key/CA ARNs were not changed.

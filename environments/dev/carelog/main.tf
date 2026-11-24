@@ -1,3 +1,12 @@
+# Values handed to the module, exposed through outputs so tests can assert them
+# (test assertions cannot address resources inside module.service).
+locals {
+  app_environment = merge(var.runtime.environment, var.enrollment_tls_candidate.environment)
+  # Explicit [] removes the app's 8080 mapping. null (the variable default) makes the module emit
+  # containerPort 8080 for the app container, which would collide with the proxy on the task IP.
+  app_port_mappings = var.enrollment_tls_candidate.app_port_mappings
+}
+
 module "service" {
   source                                = "../../../modules/ecs-service"
   assign_public_ip                      = var.preserve.assign_public_ip
@@ -17,14 +26,14 @@ module "service" {
   cpu                                   = var.runtime.cpu
   memory                                = var.runtime.memory
   desired_count                         = var.runtime.initial_desired_count
-  environment                           = merge(var.runtime.environment, var.enrollment_tls_candidate.environment)
+  environment                           = local.app_environment
   secrets                               = merge(var.runtime.secrets, var.enrollment_secret_arn == null ? {} : { CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET = var.enrollment_secret_arn })
   execution_secret_arns                 = setunion(var.runtime.execution_secret_arns, var.enrollment_tls_candidate.secret_arns, var.enrollment_secret_arn == null ? toset([]) : toset([var.enrollment_secret_arn]))
   execution_kms_key_arns                = setunion(var.runtime.execution_kms_key_arns, var.enrollment_tls_candidate.kms_key_arns)
   additional_ecr_repository_arns        = var.enrollment_tls_candidate.ecr_repository_arns
   additional_volume_names               = setunion(var.runtime.additional_volume_names, var.enrollment_tls_candidate.volume_names)
   app_mount_points                      = concat(var.runtime.app_mount_points, var.enrollment_tls_candidate.app_mount_points)
-  app_port_mappings                     = var.enrollment_tls_candidate.app_port_mappings
+  app_port_mappings                     = local.app_port_mappings
   app_container_dependencies            = var.enrollment_tls_candidate.app_dependencies
   additional_containers                 = var.enrollment_tls_candidate.containers
   app_policy_json                       = var.runtime.app_policy_json
