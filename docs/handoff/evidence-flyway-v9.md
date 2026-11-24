@@ -144,3 +144,82 @@ Needed for a definitive answer (not used here):
 ## 7. 2026-11-24 B4: isolated rollback test (no new DEV evidence)
 
 The isolated Docker proof of the Core V3 rollback (`candidates/core-rollback-test/`, results in `evidence-core-rollback-test.md`) used only local PostgreSQL. It does not read or change DEV. No new DEV evidence was found: the DEV V3 and V9 status above is unchanged (V3 not applied as of the last recorded Core start, 2026-11-21 03:11Z; V9 unknown).
+
+## 8. 2026-11-24 B5: DEV status table and blocked read-only paths
+
+Scope: existing read-only paths only (AWS describe, list and filter with profile `ranikun-admin`, ap-northeast-2; repo search).
+No secret value was read (`describe-secret` and task-definition names only), no DB connection, no ECS task or Exec, no write.
+Repo HEAD: a142bc3b.
+
+### 8.1 DEV status (known vs unknown)
+
+| Item | Status | Evidence (date) | Source |
+| --- | --- | --- | --- |
+| Core V1, V2 in DEV | Known: applied | 2026-11-21 03:02:56-03:02:59Z "Successfully applied 2 migrations ... now at version v2"; 03:11:17Z "Current version ... 2" | `/ecs/ranikun-platform-dev-core` |
+| Core V3 in DEV | **Unknown. Last recorded state: not applied** (version 2 at 03:11Z) | No Flyway line after 2026-11-21 03:11:17Z in the 7-day retention window | same log group, `filter-log-events` |
+| Core schema additions (`password_credentials.credential_revision`, `carelog_registration_operation`) | **Unknown** (V3 not recorded as applied) | none | needs the queries in 8.3 |
+| Carelog V9 in DEV (`users.external_account_id`, receipts table, CHECK) | **Unknown.** No evidence of application. Flyway is disabled for Carelog (`CARELOG_FLYWAY_ENABLED=false`, no `SPRING_FLYWAY_ENABLED`) in the task definitions | `ranikun-carelog-dev-api:1-6` (section 4) | ECS describe |
+| Carelog Flyway lines in logs | None in the 14-day retention window. 2026-11-21 03:08-03:15Z show `Unable to start web server` and `Application run failed`; the root cause is not in the filtered lines | `/ecs/ranikun-carelog-dev-api` `filter-log-events` for Flyway, "permission denied", "must be owner" | CloudWatch |
+| Core runtime and Flyway DB users | **Known: same secret.** `ranikun-platform-dev-core:3`: `PLATFORM_IDENTITY_DATASOURCE_USERNAME/PASSWORD` and `PLATFORM_IDENTITY_FLYWAY_DATASOURCE_USERNAME/PASSWORD` all reference `ranikun/dev/shared-db-admin-DmopGX` (keys `username`, `password`) | ECS describe (names only) | ECS |
+| Carelog runtime DB user | **Known: same secret.** `ranikun-carelog-dev-api:6`: `SPRING_DATASOURCE_USERNAME/PASSWORD` reference `ranikun/dev/shared-db-admin-DmopGX` | ECS describe (names only) | ECS |
+| Owner, DDL rights, SELECT on history, search_path (schemas `identity`, `public`) | **Unknown** | no DB read possible (8.2) | - |
+| Secret `ranikun/dev/shared-db-admin` | Metadata only: last changed 2026-11-21 03:24 JST, no description, rotation not enabled | `secretsmanager describe-secret` | Secrets Manager |
+| Cluster `dev-shared` | Aurora PostgreSQL 16.15, available, port 5432, IAM DB auth **disabled**, Data API **disabled**, parameter group `default.aurora-postgresql16`, no log exports | `rds describe-db-clusters` (2026-11-24) | RDS |
+| Instance `dev-shared-1` | `db.serverless`, not publicly accessible, Performance Insights **off**; `describe-db-log-files` returned "not ready" | `rds describe-db-instances` | RDS |
+| Recent DB events | Cluster created 2026-11-20 08:14Z; repeated pause and resume of `dev-shared-1` on 2026-11-20 | `rds describe-events` | RDS |
+| Core and Carelog services | Both `desiredCount 0`, `runningCount 0` in cluster `dev-shared` (last steady-state events 2026-11-24 15:41 JST). No live task is using the DB now | `ecs describe-services` | ECS |
+
+### 8.2 Blocked paths (each tried; none opened a new network path or read a secret)
+
+| Path | Result | Access still needed |
+| --- | --- | --- |
+| AWS CLI, profile `ranikun-admin` | Works when passed as `--profile`; identity is the SSO role `AWSReservedSSO_RanikunDevAdmin_*` | none for metadata |
+| Other profiles (`ranikun-dev`, `ranikun-dev-shared-apply`, ...) | Not used. `rankun-admin-isolated` SSO token is expired; re-login is an interactive step, not done | not needed for this scope |
+| CloudWatch Logs (Core, Carelog) | Done (8.1). Retention: Core 7 days, Carelog 14 days, so older Flyway lines are gone | none |
+| ECS services and task definitions (describe only) | Done (8.1). No task started, no Exec | none |
+| RDS metadata and events | Done. Parameter-level `search_path` not read | optional: `rds describe-db-cluster-parameters` filtered to `search_path` (read-only) |
+| RDS log files | Blocked: `dev-shared-1` "not ready" at the time of the call | retry once the instance is `available` |
+| Performance Insights | Not enabled on `dev-shared-1` | none for this scope |
+| RDS Data API, IAM DB auth | Both disabled on `dev-shared` (read from the cluster) | none (do not enable) |
+| SQL connection to DEV (TCP 5432) | **Blocked by the rules of this task.** The only credential is `shared-db-admin`, which may not be used. No read-only DB role exists. The cluster is private (VPC `vpc-0450d6431bc98c338`, SG `sg-0004121ff1c8f81dc`) | a host inside the DEV VPC with TCP 5432 to `dev-shared-1`, and a read-only DB role (8.3) whose credential the DB owner supplies through an approved route |
+| Repo inspection routes | None found for DEV. Matches for `psql`, `bastion` and `ssm start-session` are local docker-compose e2e scripts and handoff docs. No read-only DEV query runbook exists | none |
+| SSM Parameter Store, Secrets Manager values | Not read (metadata only) | none needed |
+
+### 8.3 Access and SQL needed for a definitive answer (read-only, run by the DB owner)
+
+Access (proposed, least privilege):
+- Network: a host in VPC `vpc-0450d6431bc98c338` with TCP 5432 to `dev-shared-1`, reachable from that host only.
+- Database role `ro_flyway_check` (LOGIN), with:
+  `GRANT CONNECT ON DATABASE app TO ro_flyway_check;`
+  `GRANT USAGE ON SCHEMA identity, public TO ro_flyway_check;`
+  `GRANT SELECT ON identity.flyway_schema_history, public.flyway_schema_history TO ro_flyway_check;`
+  Optional, only if the owner wants the DEV search_path reproduced: `ALTER ROLE ro_flyway_check SET search_path = identity, public;`
+  No table data grants, no DDL, no `pg_read_all_data`.
+- Credential: owned by the DEV DB owner and delivered outside this task. The application secrets are not used.
+
+Queries (database `app`, run by the read-only role; the owner may run the grant query as owner):
+
+```sql
+SELECT installed_rank, version, description, success, installed_on FROM identity.flyway_schema_history ORDER BY installed_rank DESC LIMIT 5;
+SELECT installed_rank, version, description, success, installed_on FROM public.flyway_schema_history ORDER BY installed_rank DESC LIMIT 5;
+SELECT nspname, pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname IN ('identity', 'public');
+SELECT schemaname, tablename, tableowner FROM pg_tables WHERE schemaname IN ('identity', 'public');
+SELECT grantee, table_schema, table_name, privilege_type FROM information_schema.table_privileges WHERE table_name = 'flyway_schema_history';
+SELECT rolname, rolsuper, rolcreatedb, rolinherit, rolcanlogin FROM pg_roles WHERE rolname IN ('<shared-db-admin username, from the owner>', 'ro_flyway_check');
+SELECT rolname, rolconfig FROM pg_roles WHERE rolconfig IS NOT NULL;
+SELECT to_regclass('identity.carelog_registration_operation') IS NOT NULL AS core_v3_table;
+SELECT column_name FROM information_schema.columns WHERE table_schema = 'identity' AND table_name = 'password_credentials' AND column_name = 'credential_revision';
+SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'external_account_id';
+```
+
+Notes: `information_schema.table_privileges` shows only the grants the querying role can see, so run it as the owner to
+see all grantees. The admin role name is read by the owner from the secret; it is not written here. The SQL was parsed
+and run on a throwaway PostgreSQL 16 container with no DEV data; the container was removed.
+
+### 8.4 Open questions for the DEV owner
+
+1. Is Core V3 applied in DEV? (`identity.flyway_schema_history` rows and the column and table checks.)
+2. Is Carelog V9 applied in DEV? (`public.flyway_schema_history` and `users.external_account_id`.)
+3. Who owns schemas `identity` and `public`, and does `shared-db-admin` hold DDL on them? (Expected: yes, it is the admin identity both services use.)
+4. Is `search_path` set for the DEV roles? Is `identity` reached through search_path or by qualified names?
+5. Should the runtime application and Flyway use separate roles in DEV before any V3 or V9 apply? (Not decided here.)

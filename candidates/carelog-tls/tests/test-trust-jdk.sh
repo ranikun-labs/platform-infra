@@ -20,7 +20,7 @@ if docker run --rm -v "$(host_path "$W"):/p" -w /p "$JAVAC_IMG" javac TlsProbe.j
   pass "probe compiled with JDK image"
 else fail "probe compiled with JDK image" "needs $JAVAC_IMG"; summary test-trust-jdk; exit $?; fi
 
-docker network create --subnet 10.250.9.0/24 "$NET" >/dev/null
+docker network create --subnet 10.250.9.0/24 "$NET" >/dev/null || { fail "could not create the test network (subnet in use?)"; summary test-trust-jdk; exit $?; }
 docker run -d --name "$MT" --network "$NET" --ip $META_IP --entrypoint sh "$PROXY_IMG" -c \
   "echo '{\"Containers\":[{\"Networks\":[{\"IPv4Addresses\":[\"$PROXY_IP\"]}]}]}' > /usr/share/nginx/html/task && exec nginx -g 'daemon off;'" >/dev/null
 sleep 2

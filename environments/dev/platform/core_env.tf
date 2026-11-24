@@ -3,20 +3,24 @@
 # Key rules (messages name keys or gates only; values are never printed):
 # - "Candidate on" = merged env flag PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED or
 #   PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED is "true" (trimmed, case-insensitive).
-# - Candidate OFF: the candidate environment is ignored; env, secrets and containers equal the live inputs
-#   (plus PLATFORM_CORE_PORT, which the module always sets). The image is the live image unless
-#   enrollment_core_candidate is set (then the V3 gate below applies).
-# - Candidate ON, all-or-nothing (completeness gate): the pinned Core image, the trust-init container
-#   (digest-pinned, same base as the Core image), the carelog-trust volume, the read-only app mount, the
-#   dependsOn SUCCESS on the init container, the truststore JVM options, 'dev' in SPRING_PROFILES_ACTIVE,
-#   and the enrollment Bearer secret reference must all be present. No TLS server bundle may be given to Core.
+# - Candidate OFF: the candidate inputs are NOT passed to the module at all (containers, volumes, mounts,
+#   dependencies, ECR and KMS ARNs, secret ARNs, port mappings, env, enrollment secret). The task definition
+#   inputs equal the live inputs plus PLATFORM_CORE_PORT (test: core_gate_regression.tftest.hcl).
+# - The Core image is the candidate digest whenever enrollment_core_candidate is set, even with the flag off.
+#   That independent switch requires the V3 documentation gate (core_v3_db_change_approval).
+# - Candidate ON, all-or-nothing (completeness gate, enrollment_completeness): registration true, enrollment
+#   true, Identity auth explicitly true, Identity persistence not disabled, the enrollment base URL exactly
+#   https://<carelog_enrollment_host>:8443, a well-formed enrollment-service secret ARN referenced in the
+#   container secrets and the execution role, the pinned Core image, the trust-init container (digest-pinned,
+#   its own writable mount of carelog-trust at /run/carelog-trust), the app's read-only mount, dependsOn
+#   SUCCESS, the truststore options and 'dev' in SPRING_PROFILES_ACTIVE. No TLS server bundle for Core.
 # - Candidate ON: SPRING_PROFILES_ACTIVE gets "dev" appended (comma list, trimmed, case-insensitive, no
 #   duplicates). "prod" or "production" as a list element fails the plan (decision: prep-cert-secrets.md 12).
 # - Candidate ON: JAVA_TOOL_OPTIONS keeps every live option and gets the private truststore options. A
-#   truststore option that differs from ours (in the live or the candidate value), a duplicate with a
-#   different value, or an option that disables certificate checks fails the plan (option keys only).
+#   truststore option that differs from ours (live or candidate value), a duplicate with a different value,
+#   or an option that disables certificate checks fails the plan (option keys only).
 # - V3 gate (independent of the enrollment flag): when the Core image differs from the live image,
-#   core_v3_db_change_approval must be given (documentation gate, not proof; see variables.tf).
+#   core_v3_db_change_approval must be given (documentation gate, not proof; variables.tf).
 locals {
   core_live_env    = var.core_runtime.environment
   core_tls_env_all = var.enrollment_tls_candidate.environment
@@ -64,8 +68,7 @@ locals {
     for o in local.jto_all_opts : split("=", o)[0]
     if contains(local.jto_trust_keys, split("=", o)[0]) && !contains(local.jto_allowed_opts, o)
   ]
-  # Options that switch off certificate validation (name patterns; the JDK ignores unknown -D keys, so
-  # these are refused by pattern, not by a list of JVM keys).
+  # Options that switch off certificate validation (name patterns).
   jto_unsafe = [
     for o in local.jto_all_opts : split("=", o)[0]
     if can(regex("(?i)trustall|insecure|nosslverif|disablehostname|sslcontext=|trustmanager", o))
@@ -92,6 +95,24 @@ locals {
     local.jto_value == null ? {} : { (local.jto_key) = local.jto_value },
   )
 
+  # ---- Gated candidate inputs: the module receives them only when the candidate is on -----------
+  core_gate_containers      = local.core_candidate_on ? var.enrollment_tls_candidate.containers : []
+  core_gate_volumes         = local.core_candidate_on ? var.enrollment_tls_candidate.volume_names : toset([])
+  core_gate_mounts          = local.core_candidate_on ? var.enrollment_tls_candidate.app_mount_points : []
+  core_gate_deps            = local.core_candidate_on ? var.enrollment_tls_candidate.app_dependencies : []
+  core_gate_ecr             = local.core_candidate_on ? var.enrollment_tls_candidate.ecr_repository_arns : toset([])
+  core_gate_kms             = local.core_candidate_on ? var.enrollment_tls_candidate.kms_key_arns : toset([])
+  core_gate_ports           = local.core_candidate_on ? var.enrollment_tls_candidate.app_port_mappings : null
+  core_gate_secret_arns     = local.core_candidate_on ? var.enrollment_tls_candidate.secret_arns : toset([])
+  core_enrollment_secret_on = local.core_candidate_on && var.enrollment_secret_arn != null
+  core_gate_exec_enroll     = local.core_enrollment_secret_on ? toset([var.enrollment_secret_arn]) : toset([])
+  core_secret_refs = merge(
+    var.core_runtime.secrets,
+    local.core_enrollment_secret_on ? { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL = var.enrollment_secret_arn } : {},
+  )
+  core_exec_secret_arns = setunion(var.core_runtime.execution_secret_arns, local.core_gate_secret_arns, local.core_gate_exec_enroll)
+  core_exec_kms_arns    = setunion(var.core_runtime.execution_kms_key_arns, local.core_gate_kms)
+
   # ---- Completeness of the candidate (all-or-nothing) -------------------------------------------
   trust_init_name = "carelog-trust-init"
   trust_volume    = "carelog-trust"
@@ -108,6 +129,14 @@ locals {
     for m in var.enrollment_tls_candidate.app_mount_points : m
     if m.sourceVolume == local.trust_volume && m.containerPath == local.trust_mount && m.readOnly
   ]) >= 1
+  # The init container mounts the volume itself, writable, at the same path.
+  trust_init_own_mount_ok = length([
+    for c in local.trust_init_containers : c
+    if length([
+      for m in try(c.mountPoints, []) : m
+      if try(m.sourceVolume, "") == local.trust_volume && try(m.containerPath, "") == local.trust_mount && try(m.readOnly, true) == false
+    ]) == 1
+  ]) == 1
   trust_dependency_ok = length([
     for d in var.enrollment_tls_candidate.app_dependencies : d
     if d.containerName == local.trust_init_name && d.condition == "SUCCESS"
@@ -117,11 +146,21 @@ locals {
     if can(regex("enrollment-tls/server-bundle", a))
   ]) > 0
 
-  # ---- Core secret names the module will render (names only) ------------------------------------
-  core_secret_names = sort(keys(merge(
-    var.core_runtime.secrets,
-    var.enrollment_secret_arn == null || !local.core_candidate_on ? {} : { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL = var.enrollment_secret_arn },
-  )))
+  # Identity and enrollment settings, read from the merged environment (names only in messages).
+  identity_auth_ok        = lower(trimspace(lookup(local.core_merged_raw, "PLATFORM_IDENTITY_AUTH_ENABLED", "false"))) == "true"
+  identity_persistence_ok = lower(trimspace(lookup(local.core_merged_raw, "PLATFORM_IDENTITY_PERSISTENCE_ENABLED", "true"))) == "true"
+  enrollment_base_url     = lookup(local.core_merged_raw, "PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL", "")
+  enrollment_base_expect  = "https://${var.carelog_enrollment_host}:8443"
+  enrollment_base_url_ok  = local.enrollment_base_url == local.enrollment_base_expect
+  enrollment_arn_ok = var.enrollment_secret_arn == null ? false : can(regex(
+    "^arn:aws:secretsmanager:ap-northeast-2:[0-9]{12}:secret:ranikun/dev/carelog/enrollment-service-[A-Za-z0-9]{6}$",
+    var.enrollment_secret_arn,
+  ))
+  enrollment_in_exec      = var.enrollment_secret_arn == null ? false : contains(local.core_exec_secret_arns, var.enrollment_secret_arn)
+  enrollment_in_container = contains(keys(local.core_secret_refs), "PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL")
+
+  # Core secret names the module renders (names only).
+  core_secret_names = sort(keys(local.core_secret_refs))
 }
 
 # Candidate ON: the candidate may not override live values, may not add an unsafe or conflicting option, and
@@ -154,7 +193,7 @@ resource "terraform_data" "enrollment_candidate_guard" {
   }
 }
 
-# Candidate ON: every piece must be present together. Missing any one fails with the piece named.
+# Candidate ON: every piece must be present together. Missing or invalid pieces fail, each with its own message.
 resource "terraform_data" "enrollment_completeness" {
   count = local.core_candidate_on ? 1 : 0
   input = "enrollment-completeness"
@@ -169,12 +208,48 @@ resource "terraform_data" "enrollment_completeness" {
       error_message = "Enrollment on: Core application image is not the pinned enrollment-capable digest (8353cec4)."
     }
     precondition {
+      condition     = local.core_registration_flag
+      error_message = "Enrollment on: PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED must be true."
+    }
+    precondition {
+      condition     = local.core_enrollment_flag
+      error_message = "Enrollment on: PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED must be true."
+    }
+    precondition {
+      condition     = local.identity_auth_ok
+      error_message = "Enrollment on: PLATFORM_IDENTITY_AUTH_ENABLED must be explicitly true (the application default is false)."
+    }
+    precondition {
+      condition     = local.identity_persistence_ok
+      error_message = "Enrollment on: PLATFORM_IDENTITY_PERSISTENCE_ENABLED must not be false (absent means enabled in the code)."
+    }
+    precondition {
+      condition     = local.enrollment_base_url_ok
+      error_message = "Enrollment on: PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL must be exactly https://<carelog_enrollment_host>:8443 (no path, query, userinfo, whitespace, other port or host)."
+    }
+    precondition {
+      condition     = local.enrollment_arn_ok
+      error_message = "Enrollment on: enrollment_secret_arn must be the enrollment-service secret ARN (ranikun/dev/carelog/enrollment-service-<6 chars>)."
+    }
+    precondition {
+      condition     = local.enrollment_in_container
+      error_message = "Enrollment on: PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL is not in the Core container secret references."
+    }
+    precondition {
+      condition     = local.enrollment_in_exec
+      error_message = "Enrollment on: the enrollment Bearer secret ARN is not in the Core execution role secret ARNs."
+    }
+    precondition {
       condition     = length(local.trust_init_containers) == 1
       error_message = "Enrollment on: trust-init container (name carelog-trust-init) is missing from enrollment_tls_candidate.containers."
     }
     precondition {
       condition     = local.trust_init_digest_ok
       error_message = "Enrollment on: trust-init container image must be digest-pinned (repo@sha256:<64 hex>)."
+    }
+    precondition {
+      condition     = local.trust_init_own_mount_ok
+      error_message = "Enrollment on: the trust-init container must mount carelog-trust at /run/carelog-trust with readOnly false (its own writable mount)."
     }
     precondition {
       condition     = contains(var.enrollment_tls_candidate.volume_names, local.trust_volume)
@@ -197,14 +272,6 @@ resource "terraform_data" "enrollment_completeness" {
       error_message = "Enrollment on: SPRING_PROFILES_ACTIVE does not contain dev."
     }
     precondition {
-      condition     = var.enrollment_secret_arn != null
-      error_message = "Enrollment on: enrollment Bearer secret reference (PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL) is missing (enrollment_secret_arn)."
-    }
-    precondition {
-      condition     = contains(local.core_secret_names, "PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL")
-      error_message = "Enrollment on: PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL is not in the Core secret references."
-    }
-    precondition {
       condition     = !local.bundle_given_to_core
       error_message = "The TLS server bundle must not be given to Core (enrollment_tls_candidate.secret_arns contains enrollment-tls/server-bundle)."
     }
@@ -223,7 +290,7 @@ resource "terraform_data" "core_v3_gate" {
     }
     precondition {
       condition     = var.core_v3_db_change_approval == null ? false : (length(trimspace(var.core_v3_db_change_approval.reference)) > 0 && !startswith(trimspace(var.core_v3_db_change_approval.reference), "REPLACE"))
-      error_message = "core_v3_db_change_approval.reference is empty."
+      error_message = "core_v3_db_change_approval.reference is empty or a placeholder."
     }
     precondition {
       condition     = var.core_v3_db_change_approval == null ? false : can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}", var.core_v3_db_change_approval.v3_state_checked_at))
@@ -253,16 +320,24 @@ output "core_image_effective" {
 }
 
 output "core_task_inputs" {
-  description = "Names and counts of the Core task definition inputs (no values)."
+  description = "Everything the module receives for the Core task definition and execution role (names, ARNs and counts; no values)."
   value = {
     image                  = local.core_image
     candidate_on           = local.core_candidate_on
     env_names              = sort(keys(local.core_environment))
     secret_names           = local.core_secret_names
-    container_names        = sort(concat([], [for c in var.enrollment_tls_candidate.containers : try(c.name, "")]))
-    volume_names           = sort(tolist(var.enrollment_tls_candidate.volume_names))
-    mount_count            = length(var.enrollment_tls_candidate.app_mount_points)
-    dependency_count       = length(var.enrollment_tls_candidate.app_dependencies)
-    execution_secret_count = length(setunion(var.core_runtime.execution_secret_arns, var.enrollment_tls_candidate.secret_arns, var.enrollment_secret_arn == null || !local.core_candidate_on ? toset([]) : toset([var.enrollment_secret_arn])))
+    exec_secret_arns       = sort(tolist(local.core_exec_secret_arns))
+    ecr_arns               = sort(tolist(setunion(toset([var.core_runtime.ecr_repository_arn]), local.core_gate_ecr)))
+    additional_ecr_arns    = sort(tolist(local.core_gate_ecr))
+    kms_arns               = sort(tolist(local.core_exec_kms_arns))
+    volume_names           = sort(tolist(local.core_gate_volumes))
+    mount_points           = [for m in local.core_gate_mounts : "${m.sourceVolume}:${m.containerPath}:${m.readOnly ? "ro" : "rw"}"]
+    dependencies           = [for d in local.core_gate_deps : "${d.containerName}:${d.condition}"]
+    container_names        = sort([for c in local.core_gate_containers : try(c.name, "")])
+    additional_containers  = length(local.core_gate_containers)
+    port_mapping_count     = local.core_gate_ports == null ? -1 : length(local.core_gate_ports)
+    mount_count            = length(local.core_gate_mounts)
+    dependency_count       = length(local.core_gate_deps)
+    execution_secret_count = length(local.core_exec_secret_arns)
   }
 }

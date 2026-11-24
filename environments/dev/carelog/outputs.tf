@@ -27,3 +27,8 @@ output "enrollment_secret_reference" {
   value     = var.enrollment_secret_arn
   sensitive = true
 }
+
+# Candidate pieces the module receives (names and counts only), for the disabled-state regression tests.
+output "candidate_container_names" { value = tolist([for c in var.enrollment_tls_candidate.containers : try(c.name, "")]) }
+output "candidate_volume_names" { value = tolist(var.enrollment_tls_candidate.volume_names) }
+output "candidate_additional_ecr_arns" { value = tolist(var.enrollment_tls_candidate.ecr_repository_arns) }

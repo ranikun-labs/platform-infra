@@ -71,16 +71,18 @@ variables {
   }
   enrollment_tls_candidate = {
     volume_names        = ["carelog-trust"]
-    containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+    containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false, mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }] }]
     app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
     app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
     ecr_repository_arns = []
     secret_arns         = []
     kms_key_arns        = []
     environment = {
-      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED  = "true"
-      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL = "https://ranikun-carelog-dev-api.dev.internal:8443"
-      JAVA_TOOL_OPTIONS                             = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED   = "true"
+      PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL  = "https://ranikun-carelog-dev-api.dev.internal:8443"
+      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL  = "https://ranikun-carelog-dev-api.dev.internal:8443"
+      JAVA_TOOL_OPTIONS                              = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
     }
     app_port_mappings = []
   }
@@ -239,8 +241,10 @@ run "enabled_missing_trust_init_container_fails" {
       ecr_repository_arns = []
       secret_arns         = []
       kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
-      app_port_mappings   = []
+      environment = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL = "https://ranikun-carelog-dev-api.dev.internal:8443", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings = []
     }
   }
 }
@@ -252,14 +256,16 @@ run "enabled_trust_init_not_digest_pinned_fails" {
   variables {
     enrollment_tls_candidate = {
       volume_names        = ["carelog-trust"]
-      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init:latest", essential = false }]
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init:latest", essential = false, mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }] }]
       app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
       app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
       ecr_repository_arns = []
       secret_arns         = []
       kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
-      app_port_mappings   = []
+      environment = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL = "https://ranikun-carelog-dev-api.dev.internal:8443", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings = []
     }
   }
 }
@@ -271,14 +277,16 @@ run "enabled_missing_volume_fails" {
   variables {
     enrollment_tls_candidate = {
       volume_names        = []
-      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false, mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }] }]
       app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
       app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
       ecr_repository_arns = []
       secret_arns         = []
       kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
-      app_port_mappings   = []
+      environment = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL = "https://ranikun-carelog-dev-api.dev.internal:8443", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings = []
     }
   }
 }
@@ -290,14 +298,16 @@ run "enabled_mount_not_read_only_fails" {
   variables {
     enrollment_tls_candidate = {
       volume_names        = ["carelog-trust"]
-      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false, mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }] }]
       app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }]
       app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
       ecr_repository_arns = []
       secret_arns         = []
       kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
-      app_port_mappings   = []
+      environment = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL = "https://ranikun-carelog-dev-api.dev.internal:8443", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings = []
     }
   }
 }
@@ -309,14 +319,16 @@ run "enabled_missing_init_dependency_fails" {
   variables {
     enrollment_tls_candidate = {
       volume_names        = ["carelog-trust"]
-      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false, mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }] }]
       app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
       app_dependencies    = []
       ecr_repository_arns = []
       secret_arns         = []
       kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
-      app_port_mappings   = []
+      environment = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL = "https://ranikun-carelog-dev-api.dev.internal:8443", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings = []
     }
   }
 }
@@ -337,14 +349,16 @@ run "enabled_tls_bundle_given_to_core_fails" {
   variables {
     enrollment_tls_candidate = {
       volume_names        = ["carelog-trust"]
-      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false, mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }] }]
       app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
       app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
       ecr_repository_arns = []
       secret_arns         = ["arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:ranikun/dev/carelog/enrollment-tls/server-bundle-AbCdEf"]
       kms_key_arns        = []
-      environment         = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
-      app_port_mappings   = []
+      environment = { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+      PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL = "https://ranikun-carelog-dev-api.dev.internal:8443", JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" }
+      app_port_mappings = []
     }
   }
 }
@@ -357,7 +371,7 @@ run "enabled_registration_flag_alone_is_on" {
     enrollment_secret_arn = null
     enrollment_tls_candidate = {
       volume_names        = ["carelog-trust"]
-      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false, mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }] }]
       app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
       app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
       ecr_repository_arns = []
@@ -445,16 +459,18 @@ run "enabled_prod_from_candidate_fails" {
   variables {
     enrollment_tls_candidate = {
       volume_names        = ["carelog-trust"]
-      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false }]
+      containers          = [{ name = "carelog-trust-init", image = "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", essential = false, mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }] }]
       app_mount_points    = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = true }]
       app_dependencies    = [{ containerName = "carelog-trust-init", condition = "SUCCESS" }]
       ecr_repository_arns = []
       secret_arns         = []
       kms_key_arns        = []
       environment = {
-        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
-        SPRING_PROFILES_ACTIVE                       = "prod"
-        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED   = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL  = "https://ranikun-carelog-dev-api.dev.internal:8443"
+        SPRING_PROFILES_ACTIVE                         = "prod"
+        JAVA_TOOL_OPTIONS                              = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
       }
       app_port_mappings = []
     }
@@ -487,8 +503,10 @@ run "enabled_jto_live_options_preserved_and_truststore_appended" {
     })
     enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
       environment = {
-        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
-        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED   = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL  = "https://ranikun-carelog-dev-api.dev.internal:8443"
+        JAVA_TOOL_OPTIONS                              = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
       }
     })
   }
@@ -571,8 +589,10 @@ run "candidate_jto_other_truststore_fails" {
   variables {
     enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
       environment = {
-        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
-        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStore=/tmp/other.jks"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED   = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL  = "https://ranikun-carelog-dev-api.dev.internal:8443"
+        JAVA_TOOL_OPTIONS                              = "-Djavax.net.ssl.trustStore=/tmp/other.jks"
       }
     })
   }
@@ -585,8 +605,10 @@ run "candidate_jto_other_password_fails" {
   variables {
     enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
       environment = {
-        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
-        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStorePassword=other"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED   = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL  = "https://ranikun-carelog-dev-api.dev.internal:8443"
+        JAVA_TOOL_OPTIONS                              = "-Djavax.net.ssl.trustStorePassword=other"
       }
     })
   }
@@ -599,8 +621,10 @@ run "candidate_jto_same_key_twice_different_values_fails" {
   variables {
     enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
       environment = {
-        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
-        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStore=/etc/x.jks -Djavax.net.ssl.trustStorePassword=changeit"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED   = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL  = "https://ranikun-carelog-dev-api.dev.internal:8443"
+        JAVA_TOOL_OPTIONS                              = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStore=/etc/x.jks -Djavax.net.ssl.trustStorePassword=changeit"
       }
     })
   }
@@ -613,8 +637,10 @@ run "candidate_jto_trust_all_fails" {
   variables {
     enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
       environment = {
-        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
-        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustAll=true -Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED   = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL  = "https://ranikun-carelog-dev-api.dev.internal:8443"
+        JAVA_TOOL_OPTIONS                              = "-Djavax.net.ssl.trustAll=true -Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
       }
     })
   }
@@ -627,8 +653,10 @@ run "candidate_jto_trust_store_none_fails" {
   variables {
     enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
       environment = {
-        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
-        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStore=NONE"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED   = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL  = "https://ranikun-carelog-dev-api.dev.internal:8443"
+        JAVA_TOOL_OPTIONS                              = "-Djavax.net.ssl.trustStore=NONE"
       }
     })
   }
@@ -640,8 +668,10 @@ run "candidate_jto_revocation_toggle_is_allowed" {
   variables {
     enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
       environment = {
-        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
-        JAVA_TOOL_OPTIONS                            = "-Dcom.sun.net.ssl.checkRevocation=false -Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED   = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL  = "https://ranikun-carelog-dev-api.dev.internal:8443"
+        JAVA_TOOL_OPTIONS                              = "-Dcom.sun.net.ssl.checkRevocation=false -Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
       }
     })
   }
@@ -661,9 +691,11 @@ run "enabled_candidate_override_of_live_key_fails" {
   variables {
     enrollment_tls_candidate = merge(var.enrollment_tls_candidate, {
       environment = {
-        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
-        PLATFORM_ENVIRONMENT                         = "staging"
-        JAVA_TOOL_OPTIONS                            = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED   = "true"
+        PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
+        PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL  = "https://ranikun-carelog-dev-api.dev.internal:8443"
+        PLATFORM_ENVIRONMENT                           = "staging"
+        JAVA_TOOL_OPTIONS                              = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
       }
     })
   }

@@ -309,3 +309,43 @@ RUN_AWS_SIM=1 TERRAFORM=<terraform 경로> sh candidates/carelog-tls/tests/run-a
 - DEV 스키마 소유자, 런타임 역할의 권한, `search_path`, Flyway가 어떤 데이터소스로 도는지(라이브 Task 정의는 둘 다 `shared-db-admin`).
 - 실제 Aurora(TLS), 데이터 양에 따른 `ALTER TABLE` 잠금 시간, 가입 재시도(Carelog 가입 엔드포인트가 있는 환경), ALB·ECS 헬스·Secret 주입.
 - 결정: V3를 공유 관리자 자격 증명으로 실행해도 되는지, 승인 기록자와 위치(`core_v3_db_change_approval`), Izenpe 루트가 필요한 엔드포인트가 있는지.
+
+## 13. 4차 외부 리뷰 반영 (기준 a142bc3)
+
+AWS 쓰기, DEV DB 변경, Terraform apply, 새 Core 기동은 하지 않았다.
+
+### 13.1 반영 내용
+- **가입 OFF 회귀 (Core)**: 후보 입력(trust-init, 볼륨, 마운트, 의존성, 추가 ECR·KMS, 가입용 Secret)을 남겨 둔 채 플래그만 끄면 이전 배선이 이를 Task 정의로 넘기던 결함이 있었다(A4 입력). `core_env.tf`의 `core_gate_*`·`core_exec_*`로 가입 ON일 때만 전달하도록 고쳤다. `tests/core_gate.tftest.hcl`이 전체 집합을 라이브 기준과 같게 고정하고, 조각별 테스트가 있다. 가입 OFF에서 Core 이미지를 바꾸는 경우 V3 승인 입력(`core_v3_db_change_approval`)이 계속 필요하다.
+- **Carelog 루트 (발견)**: 켜고 끄는 스위치가 없다. "끔"은 후보 입력이 비어 있음을 뜻한다. 비어 있을 때 기준과 같고 프록시·8443·번들 Secret이 없음을 `tests/disabled_gate.tftest.hcl`로 고정했고, 후보를 채우면 가입용 Secret 없이도 컨테이너가 나타나는 한계를 문서화한 테스트로 남겼다. 명시적 스위치(기본값은 현재 동작)를 둘지는 Carelog 루트 소유자가 정한다.
+- **가입 ON 완전성**: Registration, Enrollment, Identity Auth(명시적 true), Persistence(false가 아님), 가입 주소가 `https://<carelog_enrollment_host>:8443`과 정확히 같음(변수, 기본 `ranikun-carelog-dev-api.dev.internal`), 형식이 맞는 가입용 Secret ARN(컨테이너 Secret과 실행 역할 모두), trust-init 컨테이너가 `carelog-trust`를 `/run/carelog-trust`에 쓰기 가능으로 직접 마운트. 항목마다 음성 테스트가 있다.
+- **배포 직전 검사**: `check-core-digest.sh --taskdef <렌더된 Core Task 정의 JSON> <푸시된 trust-init 참조>`가 앱 이미지가 후보 digest와 같은지, trust-init 이미지가 푸시된 digest와 같고 digest 고정인지, 기반 라벨·레이어가 일치하는지, 마운트와 `dependsOn`이 맞는지 확인한다. 롤아웃 문서 8.2절에서 `register-task-definition` 직전 필수 단계다. 픽스처(`tests/fixtures/`)로 좋은 사례 1건과 나쁜 사례 9건을 시험한다(13건).
+- **롤백 문구**: 이전 Core `ad9f84…`로의 롤백은 "격리 환경(Docker, PostgreSQL 16, 일회용 데이터)에서 조건부 검증, 실제 DEV는 미검증"으로 갱신했다. 라이브 런타임과 Flyway 자격 증명이 모두 `shared-db-admin`이라는 점도 적었다.
+- **DEV 읽기 전용 확인 (`evidence-flyway-v9.md` 8절)**: Core V1·V2는 적용됨, Core V3·Carelog V9·스키마·두 DB 사용자의 실효 권한은 알 수 없음. 서비스는 모두 desired 0. 막힌 경로(DB 접속, 읽기 전용 역할 없음), 필요한 권한(읽기 전용 역할 `CONNECT`·`USAGE`·`SELECT`, 접속 경로)과 실행할 쿼리를 문서에 남겼다.
+
+### 13.2 재현과 결과
+```
+export AWS_PROFILE=ranikun-admin MSYS_NO_PATHCONV=1
+RUN_AWS_SIM=1 TERRAFORM=<terraform 경로> sh candidates/carelog-tls/tests/run-all.sh   # Windows에서 약 60분
+bash candidates/core-rollback-test/run.sh                                                # 약 6분
+# 각 루트: terraform init -backend=false; fmt -check -recursive; validate; test
+```
+| 항목 | 결과 |
+|---|---|
+| `run-all.sh` 전체 실행 (이 문서의 변경 직전 작업 트리) | **FAIL 1단계**: 29단계 중 28 통과, `iam-simulation` 실패. 원인은 코드가 아니라 실행 중 AWS SSO 세션 만료(`The SSO session ... has expired`, 26건 모두 같은 오류, AWS 없이 도는 정적 검사 1건은 통과). 나머지 하위 검사 107건 통과 |
+| `iam-simulation` 재실행 | **미실행**: 로그인할 수 없어서 이 작업 트리에서는 다시 돌리지 못했다. 시뮬레이션 입력(정책 문서와 `test-iam-sim.sh`)은 직전에 27/27 통과한 `a142bc3`과 다르지 않다(`git diff`로 확인). 맥미니에서 로그인 후 이 한 단계를 다시 돌려 확인해야 한다 |
+| Terraform test | carelog 13, platform 78, finance 1, shared 2 통과. 네 루트 `fmt`·`validate` 통과 |
+| `core-rollback-test/run.sh` | 이번 라운드에는 다시 실행하지 않았다(이전 라운드 결과: 실패 0, 통과 19, 건너뜀 1). 이 라운드에서 해당 디렉터리를 수정하지 않았다 |
+- 위 `run-all.sh` 실행에는 같은 `taskdef-check` 단계가 두 번 적혀 있었다(`run-all.sh` 82·83행). 이번 커밋에서 중복 한 줄을 지워 단계 수는 29에서 28이 되었고 검사 범위는 같다. 지운 뒤에는 `sh -n`만 확인했고 전체를 다시 돌리지는 않았다.
+- 전체 실행이 약 60분 걸린 이유: 호스트에 `jq`가 없어서 `check-core-digest.sh`가 `jq`를 부를 때마다 `docker run`으로 컨테이너를 띄운다(1회 약 15초 측정). `taskdef-check` 한 단계가 약 30분이었다. 또한 40분 이상 걸리는 동안 SSO 세션이 만료됐다. 이 두 가지와 중복 단계는 별도 브랜치의 검증 실행기 개선 대상이다(아래 13.4).
+
+### 13.3 한계와 열린 항목
+- 라이브 DEV state에 대한 plan, 실제 ECS Secret 주입, Fargate, 실제 CA 체인, 앱 테스트는 하지 않았다.
+- 가입 재시도는 격리 환경에서 시험하지 못했다(Carelog 가입 엔드포인트 없음).
+- `iam-simulation`은 이 트리에서 미재확인이다(위 표).
+- 정해야 할 것: Carelog 루트의 명시적 켜고 끄는 스위치, 공유 관리자 자격 증명(`shared-db-admin`)으로 V3를 실행해도 되는지, 마이그레이션 전용 역할 분리, DEV 읽기 전용 조회 경로와 담당, 공개 CA 번들 파일 커밋 담당, 복구 담당 정책 승인.
+
+### 13.4 맥미니에서 이어갈 작업
+1. 최신 브랜치를 받는다: `git fetch origin && git switch codex/carelog-dev-tls-preserve-review`.
+2. AWS 로그인 후(`aws sso login --profile ranikun-admin`) `iam-simulation` 한 단계를 다시 돌려 27/27을 확인한다: `MSYS_NO_PATHCONV=1 AWS_PROFILE=ranikun-admin sh candidates/carelog-tls/tests/test-iam-sim.sh carelog-tls-proxy:tests` (이미지 태그는 `run-all.sh`가 빌드한 프록시 이미지, 또는 `docker build -t carelog-tls-proxy:tests candidates/carelog-tls`).
+3. 필요하면 전체 `run-all.sh`를 한 번 돌려 28단계 통과를 확정한다. 로그인은 실행 직전에 하고, 호스트에 `jq`가 있으면(맥에서는 `brew install jq`) 훨씬 빠르다.
+4. 별도 브랜치에서 검증 실행기 개선을 진행한다(리뷰 PR과 다른 목적이라 분리). 범위: `FAST|TARGETED|FULL`, 병렬 실행(기본 2), 실행별 격리, 호스트에 `jq`가 없을 때의 컨테이너 반복 호출 제거, AWS 세션 사전 확인(시작 시와 AWS 단계 직전), 증거 재사용 기록(HEAD, 작업 트리 해시, 환경, 모드, 영향 범위). 기존 FULL 28단계의 범위는 그대로 보존하고, 기존 순차 실행과 동등성을 측정한 뒤 시간 전후를 기록한다. 기존 Jira 이슈 중에는 같은 목적의 이슈가 없었고(RPL-116, RPL-125는 목적이 다름), 이슈 생성은 미리보기 후 승인이 필요하다.

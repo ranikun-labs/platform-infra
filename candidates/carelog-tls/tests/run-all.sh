@@ -79,6 +79,7 @@ step trust-init-live-ca sh "$TESTS_DIR/test-trust-init.sh" $TRUST_LIVE "$CORE_LI
 step trust-jdk sh "$TESTS_DIR/test-trust-jdk.sh" $PROXY_IMG $TRUST_CAND "$MAT" "$JAVAC_IMAGE"
 step core-digest sh "$TESTS_DIR/test-core-digest.sh" $TRUST_CAND "$CORE_IMAGE" $TRUST_LIVE "$CORE_LIVE_IMAGE" "$TFVARS"
 step ca-store-diff sh "$TESTS_DIR/ca-store-diff.sh" "$CORE_LIVE_IMAGE" "$CORE_IMAGE"
+step taskdef-check sh "$TESTS_DIR/test-taskdef-check.sh" $TRUST_CAND $TRUST_LIVE
 step iam-simulation sh "$TESTS_DIR/test-iam-sim.sh" $PROXY_IMG
 step carelog-test-proxy sh -c "docker run --rm --entrypoint sh -v '$(host_path "$CANDIDATE_DIR"):/src:ro' $PROXY_IMG -c 'cp /src/test-proxy.sh /tmp/t.sh && sh /tmp/t.sh'"
 
@@ -86,7 +87,7 @@ if [ "${SKIP_LINT:-0}" != 1 ]; then
   echo "== lint"
   step hadolint-proxy sh -c "docker run --rm -i hadolint/hadolint:latest < '$CANDIDATE_DIR/Dockerfile'"
   step hadolint-trust sh -c "docker run --rm -i hadolint/hadolint:latest hadolint --ignore DL3002 --ignore DL3066 - < '$CANDIDATE_DIR/Dockerfile.trust'"
-  step shellcheck docker run --rm -v "$(host_path "$CANDIDATE_DIR"):/s:ro" koalaman/shellcheck:stable -x -P SCRIPTDIR -s sh /s/trust-init.sh /s/proxy-entrypoint.sh /s/tests/lib.sh /s/tests/check-core-digest.sh /s/tests/test-proxy-entrypoint.sh /s/tests/test-injection.sh /s/tests/test-trust-init.sh /s/tests/test-trust-jdk.sh /s/tests/test-core-digest.sh /s/tests/ca-store-diff.sh /s/tests/test-iam-sim.sh /s/tests/gen-material.sh /s/tests/run-all.sh
+  step shellcheck docker run --rm -v "$(host_path "$CANDIDATE_DIR"):/s:ro" koalaman/shellcheck:stable -x -P SCRIPTDIR -s sh /s/trust-init.sh /s/proxy-entrypoint.sh /s/tests/lib.sh /s/tests/check-core-digest.sh /s/tests/test-proxy-entrypoint.sh /s/tests/test-injection.sh /s/tests/test-trust-init.sh /s/tests/test-trust-jdk.sh /s/tests/test-core-digest.sh /s/tests/ca-store-diff.sh /s/tests/test-taskdef-check.sh /s/tests/test-iam-sim.sh /s/tests/gen-material.sh /s/tests/run-all.sh
   step actionlint docker run --rm -v "$(host_path "$CANDIDATE_DIR/../..")":/r -w /r rhysd/actionlint:latest .github/workflows-draft/dev-carelog-tls-images.yml
 fi
 

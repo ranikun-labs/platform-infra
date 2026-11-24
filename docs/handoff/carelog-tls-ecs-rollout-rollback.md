@@ -190,7 +190,7 @@ Rollback targets for the platform services in DEV (read-only facts, 2026-11-24):
 | Core `ranikun-platform-dev-core` | `:3` | `sha256:ad9f84289f980aa708ec15213050fb912168c6f76d3c61c93d67ecdc27780001` (commit `39c5ccd4…`, PR #69) | `sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf` (commit `dc635694…`, PR #71) | Candidate applies Flyway V3 at startup (`evidence-flyway-v9.md` section 6.3). Rolling back the image does not undo V3. Service is desired 0 now. |
 | Gateway `ranikun-platform-dev-gateway` | `:3` | `sha256:22267d151f3a4e88d85ce8bd7a0448d75a241fb9d82ecd943b4ca9280c61aa0f` | `sha256:1b00276e8e67e695f2753a6428fc576e351716c3687f22b9daf8e987508073d2` (same commit `dc635694…`) | Gateway `:3` keeps its cloudflared containers. Desired 0 now. |
 
-Core's candidate is not part of the Carelog rollout. Do not roll Core back as part of a Carelog incident unless the Core owner asks for it. The Core task revision rollback and its migration effects are the Core owner's procedure.
+Core's candidate is not part of the Carelog rollout. Do not roll Core back as part of a Carelog incident unless the Core owner asks for it. Core rollback to the previous image `ad9f8428` is verified only conditionally in an isolated environment (section 8.1, conditions C1 to C3); it is NOT verified on the real DEV database, roles, ALB/ECS health or secret injection. The Core task revision rollback is the Core owner's procedure.
 
 ### 8.1 Core V3 pre-start gate (mandatory for ANY start of Core on 8353cec4, enrollment on or off)
 
@@ -212,11 +212,12 @@ Steps (all read-only; the commands are listed here and are not run by this docum
    - Not verified: which role owns schema `identity` and its tables, and whether the admin credential is that owner.
    - Consequence: the candidate runs V3 under the shared admin credential, so the runtime credential is effectively the owner. The candidate does not change this. The repository has no switch to run Flyway outside the application, so a **dedicated migration role or step needs a code change in platform-core** that is not done. Until it exists, the gate requires the DB owner's explicit decision to accept V3 under the shared admin credential. The ECS task and execution roles are not database principals; the database user comes only from the secret.
 5. **Desired count.** The Core service stays at `desiredCount` 0 until steps 1 to 4 are recorded and approved. Check with `describe-services` before any change.
-6. **Start.** One Core task definition on the candidate digest, with the trust-init wiring from the reviewed platform inputs. Watch the Core log stream for the Flyway lines (`Migrating schema "identity" to version "3"` and a success line). Then repeat step 1: version 3, `success` true, `credential_revision` present, `table_present` true. Record the result.
+6. **Start.** Before any `register-task-definition` for Core, run the section 8.2 deploy-time check on the rendered task definition (mandatory). Then one Core task definition on the candidate digest, with the trust-init wiring from the reviewed platform inputs. Watch the Core log stream for the Flyway lines (`Migrating schema "identity" to version "3"` and a success line). Then repeat step 1: version 3, `success` true, `credential_revision` present, `table_present` true. Record the result.
 
 Rollback implications:
 - Rolling back the Core image to `ad9f8428` (live `:3`) does **not** undo V3. The history keeps version 3, and the DDL is not reversed (same rule as section 6, Database).
-- Whether the live `:3` image starts with V3 already recorded in the history is **not verified**. It depends on how Flyway treats an applied migration with no local file. This must be tested on an isolated copy. The result belongs in `docs/handoff/evidence-core-rollback-test.md` (not yet present; link it only when it exists). Until then, treat a Core rollback after a V3 start as a possible Core outage.
+- Core rollback to `ad9f8428` has been verified **CONDITIONALLY in an ISOLATED environment only** (Docker, PostgreSQL 16.15, throwaway data; `docs/handoff/evidence-core-rollback-test.md`). Conditions: **C1** Flyway keeps the default `*:future` tolerance (no ignore-pattern override); **C2** if Flyway ever runs with the runtime role, that role keeps `SELECT` on `identity.flyway_schema_history`; **C3** V3 is not re-applied after the rollback (the previous Core ignores V3).
+- **NOT verified on the real DEV**: Aurora, DEV roles and grants, data volume, ALB and ECS health, secret injection, and registration retry. The live Core runtime and Flyway credentials both reference `ranikun/dev/shared-db-admin` (names only), so C1 to C3 describe a future role split, not DEV today. Do not read the isolated result as a DEV result.
 - Do not edit or delete V3 by hand as part of a rollback.
 
 Stop conditions (Core V3, in addition to section 7):
@@ -225,3 +226,39 @@ Stop conditions (Core V3, in addition to section 7):
 - The runtime-versus-migration question in step 4 has no owner decision.
 - `desiredCount` is not 0 before the gate passes.
 - A Flyway failure appears in the Core log: stop, do not restart in a loop, and escalate.
+
+### 8.2 Core deploy-time digest check (mandatory, immediately before `register-task-definition` for Core)
+
+Run after the rendered Core task definition JSON is final and before it is registered. Registration is not done by this step. The check reads the rendered file and the pushed trust-init image; it changes nothing in AWS.
+
+Inputs:
+- `<CORE_TD_JSON>`: the rendered Core task definition that will be registered (the `--cli-input-json` file from the reviewed Platform plan, kept in the private directory, never in Git).
+- `<PUSHED_TRUST_REF>`: the trust-init image reference that was pushed, by digest (`<account>.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:<64 hex>`). Read it from the publish step output, not from a tag.
+- `<LOCAL_TRUST_IMAGE>`: the same trust-init image, pulled read-only by digest (`docker pull <PUSHED_TRUST_REF>`, after an ECR login with a temporary config). Its label and layers are read; no secret is read.
+
+Command (repository root):
+```bash
+sh candidates/carelog-tls/tests/check-core-digest.sh --taskdef "<CORE_TD_JSON>" "<PUSHED_TRUST_REF>" "<LOCAL_TRUST_IMAGE>"
+```
+
+Expected output and exit code (exit 0 only):
+```
+check-core-digest: PASS rendered task definition matches the pinned Core digest, the pushed trust-init digest and its wiring
+```
+
+What it asserts, all of them (key names only in messages):
+1. Exactly one application container and exactly one `carelog-trust-init` container.
+2. The application image is the pinned candidate digest `sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf`.
+3. The `carelog-trust` volume is declared.
+4. The init container image equals `<PUSHED_TRUST_REF>` and is digest-pinned.
+5. The init container mounts `carelog-trust` at `/run/carelog-trust` with `readOnly` false.
+6. The application container mounts `carelog-trust` at `/run/carelog-trust` read-only.
+7. The application container depends on `carelog-trust-init` with condition `SUCCESS`.
+8. The local trust-init image's base label `ranikun.carelog.core-base` and its layers equal the application image (the same checks as the positional mode).
+
+Stop conditions (do not register; escalate to the Platform owner):
+- Any non-zero exit, or a message other than the PASS line above.
+- `<PUSHED_TRUST_REF>` is not a digest reference, or the local image cannot be pulled by that digest.
+- The rendered file differs from the file the check read (re-run the check after any edit; the file is the one registered).
+
+Negative fixtures used to test this step (no secrets): `candidates/carelog-tls/tests/fixtures/core-taskdef-*.json`, with `tests/test-taskdef-check.sh` (12 checks, including the pushed-digest mismatch, the tag, the read-only init mount, the missing dependsOn, the missing volume, two application containers, and a trust-init image built on the live base).

@@ -8,10 +8,39 @@ Runner: `candidates/core-rollback-test/run.sh` (README in the same directory).
 Authoritative run: `run=crt179550297236394`, `RESULT: no FAIL (0 failures)`, `exit=0`, 2026-11-24 (UTC 06:50-06:55).
 Earlier runs (7 to 9) exposed harness faults, listed in section 6. They are not results about Core.
 
+## 0. Status of this evidence (read first)
+
+- **Conditionally verified in an ISOLATED local environment only** (Docker, PostgreSQL 16.15, throwaway data, roles
+  and grants created by the runner).
+- **NOT verified on the real DEV database.** The live DEV configuration differs from the isolated roles (see 0.1).
+- Nothing in this document shows the DEV state. For DEV status and the blocked read-only paths see
+  `docs/handoff/evidence-flyway-v9.md` section 8.
+
+Not verified on DEV (must be checked there before relying on the verdict):
+- Aurora PostgreSQL specifics: TLS (`sslmode=require` in DEV, `disable` here), parameter groups, failover.
+- DEV roles and grants: who owns schema `identity` and `public`, the actual grants on `flyway_schema_history`.
+- `search_path` for the DEV roles (the test sets `search_path = identity` itself).
+- Data volume and `ALTER TABLE ... ADD COLUMN ... DEFAULT 0` lock time on DEV tables.
+- ALB and ECS health checks, secret injection, and the TLS proxy path.
+- Registration retry against the real Carelog enrollment endpoint (SKIP in this run).
+
+### 0.1 Finding: DEV does not use the role separation tested here
+
+The live task definitions reference the same Secrets Manager secret for both roles (names only, values not read):
+- Core `ranikun-platform-dev-core:3`: `PLATFORM_IDENTITY_DATASOURCE_USERNAME/PASSWORD` and
+  `PLATFORM_IDENTITY_FLYWAY_DATASOURCE_USERNAME/PASSWORD` all reference `ranikun/dev/shared-db-admin-DmopGX`.
+- Carelog `ranikun-carelog-dev-api:6`: `SPRING_DATASOURCE_USERNAME/PASSWORD` reference the same secret.
+
+So in DEV the runtime application and Flyway (if it runs) use the same admin identity, which owns or can
+alter everything. The isolated test separated a migration owner from a DML-only runtime role. That separation is not
+the live configuration. The conditions C1-C3 in section 1 are therefore conditions for a **future** role split,
+not a description of DEV today. The DEV owner and grants are unknown (see `evidence-flyway-v9.md` section 8).
+
 ## 1. Answer
 
-**Yes. The previous Core image can be used as a rollback target after the new Core image has applied V3,
-with no Flyway or setting change, provided Flyway runs with the migration role (the way the live task does).**
+**Conditionally yes, in the isolated environment. The previous Core image can be used as a rollback target after
+the new Core image has applied V3, with no Flyway or setting change, provided the migration and runtime roles are
+separated as tested (C1-C3). DEV does not currently separate them (section 0.1), so this is not established for DEV.**
 
 Conditions that the proof shows are required:
 

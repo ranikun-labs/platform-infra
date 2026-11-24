@@ -78,16 +78,16 @@ module "core" {
   memory                                = var.core_runtime.memory
   desired_count                         = var.core_desired_count
   first_task_definition_arn             = var.core_first_task_definition_arn
-  additional_ecr_repository_arns        = var.enrollment_tls_candidate.ecr_repository_arns
-  app_port_mappings                     = var.enrollment_tls_candidate.app_port_mappings
-  additional_volume_names               = var.enrollment_tls_candidate.volume_names
-  additional_containers                 = var.enrollment_tls_candidate.containers
-  app_mount_points                      = var.enrollment_tls_candidate.app_mount_points
-  app_container_dependencies            = var.enrollment_tls_candidate.app_dependencies
+  additional_ecr_repository_arns        = local.core_gate_ecr
+  app_port_mappings                     = local.core_gate_ports
+  additional_volume_names               = local.core_gate_volumes
+  additional_containers                 = local.core_gate_containers
+  app_mount_points                      = local.core_gate_mounts
+  app_container_dependencies            = local.core_gate_deps
   environment                           = local.core_environment
-  secrets                               = merge(var.core_runtime.secrets, var.enrollment_secret_arn == null ? {} : { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL = var.enrollment_secret_arn })
-  execution_secret_arns                 = setunion(var.core_runtime.execution_secret_arns, var.enrollment_tls_candidate.secret_arns, var.enrollment_secret_arn == null ? toset([]) : toset([var.enrollment_secret_arn]))
-  execution_kms_key_arns                = setunion(var.core_runtime.execution_kms_key_arns, var.enrollment_tls_candidate.kms_key_arns)
+  secrets                               = local.core_secret_refs
+  execution_secret_arns                 = local.core_exec_secret_arns
+  execution_kms_key_arns                = local.core_exec_kms_arns
   health_check                          = var.core_runtime.health_check
   log_retention_days                    = var.core_runtime.log_retention_days
   assign_public_ip                      = var.core_preserve.assign_public_ip

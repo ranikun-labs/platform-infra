@@ -151,3 +151,9 @@ variable "core_v3_db_change_approval" {
   })
   default = null
 }
+
+variable "carelog_enrollment_host" {
+  description = "Cloud Map name of the Carelog enrollment endpoint. The enrollment base URL must be exactly https://<this host>:8443."
+  type        = string
+  default     = "ranikun-carelog-dev-api.dev.internal"
+}

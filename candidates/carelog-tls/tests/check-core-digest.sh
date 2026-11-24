@@ -4,6 +4,7 @@
 # Usage:
 #   check-core-digest.sh <trust-image> <expected-core-ref>
 #   check-core-digest.sh --tfvars <platform.tfvars.example> <trust-image>
+#   check-core-digest.sh --taskdef <rendered-core-task-definition.json> <pushed-trust-init-ref> [local-trust-image]
 #
 # The expected Core digest is the Core container image of the candidate Core task definition:
 #   - positional mode: given explicitly (the workflow passes the candidate Core input);
@@ -19,6 +20,50 @@ set -eu
 
 PINNED_CORE_DIGEST="124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf"
 fail() { echo "check-core-digest: FAIL $1" >&2; exit 1; }
+
+if [ "${1:-}" = "--taskdef" ]; then
+  # Deploy-time mode: the ACTUAL rendered Core task definition JSON (the one to be registered) and the ACTUAL
+  # pushed trust-init reference. Checks: the application image is the pinned candidate digest and equals the
+  # trust-init base label (and layers) of the local trust-init image; the init container image equals the pushed
+  # digest, is digest-pinned, mounts carelog-trust writable at /run/carelog-trust; the application container
+  # depends on the init container (SUCCESS) and mounts carelog-trust read-only. Messages name keys only.
+  TD="${2:?task definition JSON file required}"; PUSHED="${3:?pushed trust-init reference required}"
+  LOCAL_TRUST="${4:-$PUSHED}"
+  [ -r "$TD" ] || fail "task definition file not readable"
+  # jq from the host, or from the proxy image when the host has none (no secret is passed to jq).
+  jq_() { if command -v jq >/dev/null 2>&1; then jq "$@"; else docker run --rm -i --entrypoint jq "${JQ_IMAGE:-carelog-tls-proxy:tests}" "$@"; fi; }
+  case "$PUSHED" in
+    *@sha256:????????????????????????????????????????????????????????????????) ;;
+    *) fail "pushed trust-init reference is not a digest reference" ;;
+  esac
+  n_app=$(jq_ -r '[.containerDefinitions[] | select(.name != "carelog-trust-init")] | length' < "$TD") || fail "task definition is not readable JSON"
+  n_init=$(jq_ -r '[.containerDefinitions[] | select(.name == "carelog-trust-init")] | length' < "$TD")
+  [ "$n_app" = 1 ] || fail "task definition must have exactly one application container (found $n_app)"
+  [ "$n_init" = 1 ] || fail "task definition must have exactly one carelog-trust-init container (found $n_init)"
+  APP_IMG=$(jq_ -r '[.containerDefinitions[] | select(.name != "carelog-trust-init")][0].image' < "$TD")
+  INIT_IMG=$(jq_ -r '[.containerDefinitions[] | select(.name == "carelog-trust-init")][0].image' < "$TD")
+
+  [ "$APP_IMG" = "$PINNED_CORE_DIGEST" ] || fail "application container image is not the pinned candidate Core digest (8353cec4)"
+  jq_ -e '[.volumes[]? | select(.name == "carelog-trust")] | length == 1' < "$TD" >/dev/null || fail "carelog-trust volume is not declared"
+  [ "$INIT_IMG" = "$PUSHED" ] || fail "trust-init container image differs from the pushed trust-init reference"
+  case "$INIT_IMG" in
+    *@sha256:????????????????????????????????????????????????????????????????) ;;
+    *) fail "trust-init container image is not digest-pinned" ;;
+  esac
+  jq_ -e '[.containerDefinitions[] | select(.name == "carelog-trust-init") | (.mountPoints // [])[]
+          | select(.sourceVolume == "carelog-trust" and .containerPath == "/run/carelog-trust" and .readOnly == false)] | length == 1' \
+    < "$TD" >/dev/null || fail "trust-init container must mount carelog-trust at /run/carelog-trust writable (readOnly false)"
+  jq_ -e '[.containerDefinitions[] | select(.name != "carelog-trust-init") | (.mountPoints // [])[]
+          | select(.sourceVolume == "carelog-trust" and .containerPath == "/run/carelog-trust" and .readOnly == true)] | length == 1' \
+    < "$TD" >/dev/null || fail "application container must mount carelog-trust at /run/carelog-trust read-only"
+  jq_ -e '[.containerDefinitions[] | select(.name != "carelog-trust-init") | (.dependsOn // [])[]
+          | select(.containerName == "carelog-trust-init" and .condition == "SUCCESS")] | length == 1' \
+    < "$TD" >/dev/null || fail "application container must depend on carelog-trust-init with condition SUCCESS"
+  # Base label and layers of the local trust-init image against the application image (same checks as positional mode).
+  "$0" "$LOCAL_TRUST" "$APP_IMG" >/dev/null 2>&1 || fail "trust-init image base (label or layers) does not match the application image"
+  echo "check-core-digest: PASS rendered task definition matches the pinned Core digest, the pushed trust-init digest and its wiring"
+  exit 0
+fi
 
 if [ "${1:-}" = "--print-candidate" ]; then
   # Prints the candidate Core image from the platform input (used by the workflow pre-build check).

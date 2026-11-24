@@ -1,0 +1,51 @@
+{
+  "family": "ranikun-platform-dev-core",
+  "volumes": [
+    {
+      "name": "carelog-trust"
+    }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "ranikun-platform-dev-core",
+      "image": "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8081,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "JAVA_TOOL_OPTIONS",
+          "value": "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+        },
+        {
+          "name": "SPRING_PROFILES_ACTIVE",
+          "value": "dev"
+        }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "carelog-trust",
+          "containerPath": "/run/carelog-trust",
+          "readOnly": true
+        }
+      ],
+      "dependsOn": []
+    },
+    {
+      "name": "carelog-trust-init",
+      "image": "124495093425.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "essential": false,
+      "mountPoints": [
+        {
+          "sourceVolume": "carelog-trust",
+          "containerPath": "/run/carelog-trust",
+          "readOnly": false
+        }
+      ]
+    }
+  ]
+}
