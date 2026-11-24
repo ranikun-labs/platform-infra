@@ -33,6 +33,7 @@ jobs:
       PROXY_REPO: ranikun/carelog/tls-proxy
       INIT_REPO: ranikun/platform/core-trust-init
       CORE_IMAGE: ${{ inputs.core_image }}
+      EXPECTED_CORE_IMAGE: ${{ vars.DEV_CORE_TASK_IMAGE }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -70,6 +71,12 @@ jobs:
           grep -q 'BEGIN CERTIFICATE' "$bundle"
           if grep -q 'PRIVATE KEY' "$bundle"; then echo "CA bundle contains a private key; refusing" >&2; exit 1; fi
 
+      - name: Check trust-init base equals the Core task definition digest
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_CORE_IMAGE" || { echo "repository variable DEV_CORE_TASK_IMAGE (Core task definition image) is not set" >&2; exit 1; }
+          [ "$CORE_IMAGE" = "$EXPECTED_CORE_IMAGE" ] || { echo "core_image input differs from the Core task definition image; refusing to build" >&2; exit 1; }
+
       - name: Build and push trust-init (from Core digest)
         run: |
           set -euo pipefail
@@ -79,6 +86,8 @@ jobs:
             --build-arg CA_BUNDLE_SRC=ca/carelog-dev-ca-bundle.pem \
             --build-arg SOURCE_SHA="$GITHUB_SHA" \
             -f candidates/carelog-tls/Dockerfile.trust -t "$ref" candidates/carelog-tls
+          # Fails the job if the built image is not on the expected Core digest (label and layers).
+          sh candidates/carelog-tls/tests/check-core-digest.sh "$ref" "$EXPECTED_CORE_IMAGE"
           docker push "$ref"
           digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$ref")"
           echo "INIT_IMAGE=${digest}" >> "$GITHUB_ENV"

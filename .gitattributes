@@ -1,2 +1,3 @@
 candidates/carelog-tls/*.sh text eol=lf
 candidates/carelog-tls/Dockerfile* text eol=lf
+candidates/carelog-tls/tests/** text eol=lf

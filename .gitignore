@@ -8,3 +8,9 @@
 *.tfvars.json
 crash.log
 crash.*.log
+
+# Carelog TLS candidate tests: throwaway CA and key material must never be committed
+candidates/carelog-tls/tests/.work/
+candidates/carelog-tls/ca/*.key
+candidates/carelog-tls/tests/**/*.key
+candidates/carelog-tls/tests/**/*.pem

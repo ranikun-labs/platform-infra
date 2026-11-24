@@ -80,7 +80,7 @@ Rejected for DEV: a CA secret read by Core (it would give Core a secret read, wh
 
 ## 4. Local tests (throwaway material, Docker Desktop 29.7.2)
 
-All material is generated under `private/prep2-platform/material` (not in Git). Scripts: `private/prep2-platform/test-entrypoint-pair.sh` and `test-jdk-trust.sh`.
+All checks are now portable scripts in `candidates/carelog-tls/tests/` (run all with `candidates/carelog-tls/tests/run-all.sh`, which builds the images, generates throwaway CA and leaf material in a temporary directory, runs every check and removes the material). The results below were produced by the earlier private scripts and were re-run by `run-all.sh` on 2026-11-24 (section 12).
 
 ### 4.1 Proxy: pair check and single-secret parsing (`proxy-entrypoint.sh`)
 
@@ -96,7 +96,7 @@ The entrypoint accepts `TLS_BUNDLE_JSON` (1-secret) or `TLS_CERT_PEM` + `TLS_KEY
 | 3-secret, cert with an unrelated key | refused | PASS |
 | no TLS input | refused (`:?` message) | PASS |
 
-Command: `bash private/prep2-platform/test-entrypoint-pair.sh` -> `RESULT: PASS (all entrypoint pair cases)`. The proxy image now includes `openssl=3.3.7-r2` (pinned in `Dockerfile`; the nginx base does not ship the CLI). In this test, the metadata endpoint is a stub that returns `127.0.0.1`.
+Command: `tests/test-proxy-entrypoint.sh` -> `RESULT: PASS (all entrypoint pair cases)`. The proxy image now includes `openssl=3.3.7-r2` (pinned in `Dockerfile`; the nginx base does not ship the CLI). In this test, the metadata endpoint is a stub that returns `127.0.0.1`.
 
 ### 4.2 Proxy: JSON escaping
 
@@ -104,7 +104,7 @@ The bundle is built with `jq --rawfile` and parsed back with `jq -er`. The PEM r
 
 ### 4.3 Core trust-init with the CA baked in (`Dockerfile.trust`, `trust-init.sh`)
 
-Base: `ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680f825bf33c179dab182bf` (117 default entries).
+Base (old, superseded by section 10): `8353cec4...` with 117 default entries. The live Core digest `ad9f8428...` has 118 default entries; all store counts in section 10 use the live digest.
 
 | Case | Expected | Result |
 | --- | --- | --- |
@@ -121,7 +121,7 @@ Base: `ranikun/platform/core@sha256:8353cec4aa9bee820f43fa36e5a387f02c7873e1c680
 | 2-CA store, CA2 leaf (rotation overlap), by name | HTTP 403 | PASS |
 | 1-CA store (CA1 only), CA2 leaf | handshake fails | PASS |
 
-Command: `bash private/prep2-platform/test-jdk-trust.sh` -> `RESULT: PASS (trust-init + JDK client)`. The client is `candidates/carelog-tls/TlsProbe.java`, compiled with JDK 21 and run in the Core image.
+Command: `tests/test-trust-jdk.sh` -> `RESULT: PASS (trust-init + JDK client)`. The client is `candidates/carelog-tls/TlsProbe.java`, compiled with JDK 21 and run in the Core image.
 
 ### 4.4 Lint (2026-11-24)
 
@@ -167,33 +167,25 @@ Not re-verified in this session (carried from earlier prep): ACM Private CA gene
 
 ## 7. Edits for Carelog-owned files
 
-These files are owned by the Carelog agent or lead. I did not edit them. Apply these exact edits when the 1-secret design is chosen.
+These files are owned by the Carelog agent or lead. I did not edit them. Apply the exact before/after below. Each edit is needed for the single-bundle design and for the Core preservation rule in section 10.
 
 ### 7.1 `candidates/carelog-tls/task-fragments.json`
 
-Proxy container `secrets` (replace the two entries):
-
+Before (proxy secrets):
 ```json
 "secrets": [
-  {
-    "name": "TLS_BUNDLE_JSON",
-    "valueFrom": "REPLACE_WITH_SERVER_BUNDLE_SECRET_ARN"
-  }
+  { "name": "TLS_CERT_PEM", "valueFrom": "REPLACE_WITH_CERT_SECRET_ARN" },
+  { "name": "TLS_KEY_PEM", "valueFrom": "REPLACE_WITH_PRIVATE_KEY_SECRET_ARN" }
 ]
 ```
-
-Core init container (remove the CA secret; the CA is in the image):
-
+After:
 ```json
-"initContainer": {
-  "name": "carelog-trust-init",
-  "image": "REPLACE_WITH_TRUST_INIT_IMAGE_BUILT_FROM_CORE_DIGEST",
-  "essential": false,
-  "mountPoints": [ ... unchanged ... ]
-}
+"secrets": [
+  { "name": "TLS_BUNDLE_JSON", "valueFrom": "REPLACE_WITH_SERVER_BUNDLE_SECRET_ARN" }
+]
 ```
-
-(Delete the `"secrets"` key from `initContainer`.)
+Before (`coreTaskFragment.initContainer`): the `"secrets"` array with `CARELOG_CA_PEM`.
+After: delete the `"secrets"` key from `initContainer`. The CA is baked into the image.
 
 ### 7.2 `candidates/carelog-tls/carelog.tfvars.example`
 
@@ -209,26 +201,38 @@ After:
   ...
     secrets = [{ name = "TLS_BUNDLE_JSON", valueFrom = "REPLACE_WITH_SERVER_BUNDLE_SECRET_ARN" }]
 ```
+The bare ARN (with suffix) has no json-key and no version. This is required: it keeps one read per container start.
 
-### 7.3 `candidates/carelog-tls/platform.tfvars.example` (not in my list; for the lead)
+### 7.3 `candidates/carelog-tls/platform.tfvars.example` (not in the owned list; for the lead)
 
 Before:
 ```hcl
+  environment = {
+    ...
+    SPRING_PROFILES_ACTIVE = "dev"
+    ...
+  }
   secret_arns = ["REPLACE_WITH_CA_SECRET_ARN"]
   ...
     secrets = [{ name = "CARELOG_CA_PEM", valueFrom = "REPLACE_WITH_CA_SECRET_ARN" }]
 ```
 After:
 ```hcl
+  environment = {
+    ...
+    # SPRING_PROFILES_ACTIVE removed: live Core does not set it, and the Terraform guard in
+    # environments/dev/platform/core_env.tf rejects adding it. Add it only if the live task definition sets it.
+    ...
+  }
   secret_arns = []
   ...
-    # no secrets: the CA is baked into the trust-init image
+    # no secrets: the CA is baked into the trust-init image (CA_BUNDLE_SRC)
 ```
-Also set `ecr_repository_arns` and `containers[0].image` as before (digest of the rebuilt image with `CA_BUNDLE_SRC`).
+Keep `JAVA_TOOL_OPTIONS` as it is. The Terraform merge appends the truststore options to any live value (section 10).
 
-### 7.4 `candidates/carelog-tls/README.md` (lines 3, 46, 54)
+### 7.4 `candidates/carelog-tls/README.md`
 
-Replace "CA secret" wording with "public CA bundle baked into the trust-init image (`CA_BUNDLE_SRC`)". Lead to decide.
+Replace the references to the CA secret and to the 3 secrets with: "public CA bundle baked into the trust-init image (`CA_BUNDLE_SRC`)" and "one secret `server-bundle`". Lead to decide wording.
 
 ## 8. Conditions that would break the 1-secret design
 
@@ -248,3 +252,65 @@ Replace "CA secret" wording with "public CA bundle baked into the trust-init ima
 3. Is a CMK required? If yes, both designs cost +$1.00 per month and the boundary needs `kms:Decrypt` (see `prep-iam-boundary.md`).
 4. The real CA certificate must be committed as `candidates/carelog-tls/ca/carelog-dev-ca-bundle.pem` by its owner before the workflow can run. The draft workflow now fails closed when it is missing.
 5. The Carelog-owned edits in section 7 need the Carelog agent or lead.
+
+## 10. Core preservation and trust-init image match (2026-11-24, read-only)
+
+Live Core task definition `ranikun-platform-dev-core:3` (describe-task-definition; env and secret NAMES only, no values):
+- Image: `ranikun/platform/core@sha256:ad9f84289f980aa708ec15213050fb912168c6f76d3c61c93d67ecdc27780001`. This is **not** the digest the earlier prep used (`8353cec4...`, 117 default CA entries). The live digest has **118** default CA entries.
+- Environment names (12, plus `PLATFORM_CORE_PORT` added by the module): `PLATFORM_IDENTITY_REDIS_HOST`, `..._REDIS_TLS_ENABLED`, `..._REDIS_PORT`, `..._REDIS_KEY_PREFIX`, `..._PRODUCT_CLAIMS_BASE_URL`, `..._PRODUCT_CLAIMS_ENABLED`, `..._AUTH_ENABLED`, `..._FLYWAY_DATASOURCE_URL`, `..._DATASOURCE_URL`, `..._JWT_ACCESS_TOKEN_VALIDITY`, `..._JWT_REFRESH_TOKEN_VALIDITY`, `PLATFORM_ENVIRONMENT`.
+- Secret names (7): datasource and flyway credentials (db-admin), JWT key, Redis password, product-claims secret.
+- **Live does not set `JAVA_TOOL_OPTIONS` or `SPRING_PROFILES_ACTIVE`.** The live Core image does not bake them either (its ENV names: PATH, JAVA_HOME, LANG, LANGUAGE, LC_ALL, JAVA_VERSION).
+- The live container has a health check (readiness on 9092). The candidate does not change it.
+
+| # | Finding | Fix in this prep | Proof |
+| --- | --- | --- | --- |
+| 1 | `platform.tfvars.example` sets `SPRING_PROFILES_ACTIVE = "dev"`. Live Core does not set it, so the candidate would add an active profile. | Terraform guard `environments/dev/platform/core_env.tf`: the candidate may not add `SPRING_PROFILES_ACTIVE` unless live sets it. Edit 7.3 removes the line (Carelog-owned example). | `core_env.tftest.hcl` `adding_spring_profile_fails` (expect_failures) |
+| 2 | A candidate value that differs from a live key would override it. `JAVA_TOOL_OPTIONS` could replace live options. | `core_env.tf` merges `JAVA_TOOL_OPTIONS` (live options first, then the truststore options). Every other live key is kept. A different candidate value for a live key fails the plan (key names only in the message). | `candidate_keeps_live_parts_and_appends_truststore`, `candidate_without_live_jto_sets_truststore_only`, `override_of_live_key_fails` |
+| 3 | The old `merge(core_runtime.environment, ..., candidate.environment)` let the candidate override silently. | Replaced by `local.core_environment` in `services.tf`. | `candidate_disabled_names_equal_live_plus_port` (names = live names + `PLATFORM_CORE_PORT`) |
+| 4 | trust-init must start from the Core image's own store and only add the CA. | Design unchanged, now tested against the live digest: base store 118 -> 119 (1 CA) and 118 -> 120 (2 CAs). All 118 base aliases are still present. | `test-trust-init.sh` (12 checks) |
+| 5 | The trust-init base must equal the Core task definition digest. Nothing checked it. | `Dockerfile.trust` records `ranikun.carelog.core-base` (label from the `CORE_IMAGE` build arg). `tests/check-core-digest.sh` checks the label and the layer prefix against the expected digest. The workflow compares `core_image` with repository variable `DEV_CORE_TASK_IMAGE` before building, and runs the check after the build. | `test-core-digest.sh`: live PASS; label mismatch, older base, forged label (layers catch it) and non-digest reference all FAIL as required |
+
+Repository variable `DEV_CORE_TASK_IMAGE` must be set to the Core task definition image (the `core_runtime.image` value of the reviewed platform input). The lead sets it. Without it the workflow stops.
+
+Offline plan comparison (mock provider, no DEV state read): with the candidate disabled, Core env names equal the live names plus `PLATFORM_CORE_PORT`. With the candidate enabled and no live `JAVA_TOOL_OPTIONS`, the only additions are the enrollment keys (`PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED`, `..._BASE_URL`) and `JAVA_TOOL_OPTIONS` (truststore options only). A live `terraform plan` against DEV state was **not run**. The lead should run it with the TLS inputs and confirm that the Core diff is additive.
+
+## 11. Deployment and recovery procedure (single bundle)
+
+Protected secret: **`ranikun/dev/carelog/enrollment-service-XXXXXX` (enrollment Bearer). The procedures below never put, delete, rotate, restore, change version stages on, or read it.** The rollback operator policy (`candidates/carelog-tls/tests/iam/rollback-operator.json`) has no Allow on it and an explicit Deny (`secretsmanager:*`). Attach that Deny to the operator's permission set or role. An explicit Deny in any policy of the principal overrides an Allow elsewhere. `test-iam-sim.sh` confirms explicitDeny for stage move, put, restore, rotate, delete and read on the enrollment secret.
+
+Placeholders: `<BUNDLE_ARN>` is the full ARN with its 6-character suffix (known only after creation). `<CLUSTER>` is the DEV ECS cluster.
+
+### 11.1 Deploy: create, put, reference, force a new deployment
+
+Who: operator with `secretsmanager:CreateSecret` on `ranikun/dev/carelog/enrollment-tls/server-bundle-*` (once) and `secretsmanager:PutSecretValue` on the same name (per renewal). Deployer with `ecs:RegisterTaskDefinition` and `ecs:UpdateService` on the Carelog service. Creating or putting needs no read permission.
+
+1. Build the bundle offline from files, compact, never echoed. Keys: `tls_certificate` (one leaf PEM) and `tls_private_key` (PEM). Command: `jq -c -n --rawfile c leaf.crt --rawfile k leaf.key "{tls_certificate:\$c, tls_private_key:\$k}" > bundle.json`. Before upload check the expiry (`openssl x509 -in leaf.crt -noout -checkend 0`) and the name (`-ext subjectAltName` must list `DNS:ranikun-carelog-dev-api.dev.internal`).
+2. Create (first time only): `aws secretsmanager create-secret --name ranikun/dev/carelog/enrollment-tls/server-bundle --secret-string file://bundle.json` (AWS managed key, no CMK, like the other `ranikun/dev/*` secrets). Then delete `bundle.json`.
+3. New version (renewal): `aws secretsmanager put-secret-value --secret-id ranikun/dev/carelog/enrollment-tls/server-bundle --secret-string file://bundle.json`. The previous version becomes `AWSPREVIOUS`. Then delete `bundle.json`.
+4. Reference by bare ARN in the Terraform candidate input: `secret_arns = ["<BUNDLE_ARN>"]` and `containers[].secrets = [{ name = "TLS_BUNDLE_JSON", valueFrom = "<BUNDLE_ARN>" }]`. No json-key and no version-id. ECS reads `AWSCURRENT` when a container starts, in one read, so both keys always come from the same version.
+5. Register the reviewed task definition revision (`terraform apply` in `environments/dev/carelog` through the reviewed plan), then force a new deployment: `aws ecs update-service --cluster <CLUSTER> --service ranikun-carelog-dev-api --task-definition <family:revision> --force-new-deployment`. Running tasks keep the old pair until they are replaced.
+6. Verify: the proxy log shows `test is successful` and no entrypoint failure line; the container health check is healthy; a TLS request from a Core task to port 8443 with the correct name succeeds.
+
+### 11.2 Recover the previous Secret version (documented, not run)
+
+Who: rollback operator with `secretsmanager:DescribeSecret`, `secretsmanager:ListSecretVersionIds` and `secretsmanager:UpdateSecretVersionStage` on `<BUNDLE_ARN>` only (`tests/iam/rollback-operator.json`).
+
+1. Find the versions: `aws secretsmanager describe-secret --secret-id <BUNDLE_ARN> --query VersionIdsToStages`. Record the version id with `AWSCURRENT` and the one with `AWSPREVIOUS`.
+2. Move the stage back: `aws secretsmanager update-secret-version-stage --secret-id <BUNDLE_ARN> --version-stage AWSCURRENT --move-to-version-id <previous-version-id> --remove-from-version-id <current-version-id>`. The bad version keeps its id and is not deleted (kept for the review).
+3. Force a new deployment of `ranikun-carelog-dev-api` so that new tasks read the previous version. Verify as in 11.1 step 6.
+4. Both keys live in one version, so the rollback is atomic: the previous version is a matched pair. Key-only or cert-only rollback is not possible and not needed.
+
+### 11.3 Roll back the task definition (previous revision, digest-pinned)
+
+Who: deployer with `ecs:UpdateService` on the Carelog service (in `rollback-operator.json`).
+
+1. Use the previous Carelog task definition revision recorded before the change. The no-TLS baseline is revision `:6` in the rollout record; confirm it in `carelog-tls-ecs-rollout-rollback.md` before use. Images are digest-pinned; do not roll back by tag.
+2. `aws ecs update-service --cluster <CLUSTER> --service ranikun-carelog-dev-api --task-definition ranikun-carelog-dev-api:<previous-revision> --force-new-deployment`.
+3. Removing the Core init container is a separate change on `ranikun-platform-dev-core`. Its rollback needs its own grant (not in `rollback-operator.json`). Its previous revision is the one without the trust-init container.
+
+### 11.4 What recovery must never do
+
+- Put, delete, rotate, restore, or change a version stage on `ranikun/dev/carelog/enrollment-service-XXXXXX`.
+- Use `secretsmanager:*` on `ranikun/dev/carelog/*` for the operator.
+- Delete the bad bundle version during an incident.
+- Assume that `AWSPREVIOUS` is a good version without checking it against the incident record.

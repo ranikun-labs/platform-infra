@@ -84,7 +84,7 @@ module "core" {
   additional_containers                 = var.enrollment_tls_candidate.containers
   app_mount_points                      = var.enrollment_tls_candidate.app_mount_points
   app_container_dependencies            = var.enrollment_tls_candidate.app_dependencies
-  environment                           = merge(var.core_runtime.environment, { PLATFORM_CORE_PORT = "8081" }, var.enrollment_tls_candidate.environment)
+  environment                           = local.core_environment
   secrets                               = merge(var.core_runtime.secrets, var.enrollment_secret_arn == null ? {} : { PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL = var.enrollment_secret_arn })
   execution_secret_arns                 = setunion(var.core_runtime.execution_secret_arns, var.enrollment_tls_candidate.secret_arns, var.enrollment_secret_arn == null ? toset([]) : toset([var.enrollment_secret_arn]))
   execution_kms_key_arns                = setunion(var.core_runtime.execution_kms_key_arns, var.enrollment_tls_candidate.kms_key_arns)

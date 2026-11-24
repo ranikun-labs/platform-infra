@@ -12,6 +12,8 @@ COPY proxy-entrypoint.sh /usr/local/bin/carelog-proxy
 RUN chmod 755 /usr/local/bin/carelog-proxy \
  && chmod 644 /etc/nginx/templates/carelog.conf \
  && mkdir -p /run/carelog-tls && chmod 700 /run/carelog-tls
-# ECS ignores Dockerfile HEALTHCHECK; the task definition must set an equivalent container healthCheck.
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/bin/sh", "-c", "kill -0 \"$(cat /run/nginx.pid)\""]
+# ECS ignores Dockerfile HEALTHCHECK; the task definition carries the same command (task-fragments.json,
+# carelog.tfvars.example). start-period 300s: the app took 161-179 s to start in DEV logs (2026-11-21).
+# Failures during start-period do not count, so the proxy is not killed while the app is starting.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 CMD ["/bin/sh", "-c", "kill -0 $(cat /run/nginx.pid) && IP=$(grep -o 'listen [0-9.]*:8080' /etc/nginx/conf.d/default.conf | head -n 1 | cut -d' ' -f2 | cut -d: -f1) && nc -z $IP 8080 && nc -z $IP 8443 && nc -z 127.0.0.1 8080 && S=$(openssl s_client -connect $IP:8443 </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256 | cut -d= -f2) && F=$(openssl x509 -in /run/carelog-tls/server.crt -noout -fingerprint -sha256 | cut -d= -f2) && [ -n \"$S\" ] && [ \"$S\" = \"$F\" ] && wget -q -T 3 -O /dev/null http://127.0.0.1:9180/healthz"]
 ENTRYPOINT ["/usr/local/bin/carelog-proxy"]

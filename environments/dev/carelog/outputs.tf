@@ -8,3 +8,22 @@ output "task_role_arn" { value = module.service.task_role_arn }
 # Non-secret values the module receives for the app container (asserted in tests/).
 output "app_environment" { value = local.app_environment }
 output "app_port_mappings" { value = local.app_port_mappings }
+output "proxy_health_check" { value = local.proxy_health_check }
+
+# Secret REFERENCES (ARNs) only. Marked sensitive so plan output and test logs do not print ARNs.
+output "app_secret_references" {
+  value     = local.app_secret_references
+  sensitive = true
+}
+output "proxy_secret_references" {
+  value     = local.proxy_secret_references
+  sensitive = true
+}
+output "execution_secret_arns" {
+  value     = local.execution_secret_arns
+  sensitive = true
+}
+output "enrollment_secret_reference" {
+  value     = var.enrollment_secret_arn
+  sensitive = true
+}

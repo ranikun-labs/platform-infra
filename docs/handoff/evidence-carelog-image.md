@@ -93,3 +93,8 @@ Known gaps not closed here:
 - Proxy healthCheck checks the nginx master process, not that the listeners answer. A listener-level check needs a path that the proxy allows (for example `GET /api/v1/health` through 8080 would hit the app and fail while the app is starting, so it was not chosen).
 - Terraform plan against real DEV state and the protected inputs was not run (needs protected inputs and backend access; lead's step).
 - `environments/dev/carelog/.terraform.lock.hcl` was already modified in the worktree before this work (`git status`), and `terraform init` may touch it again. Not committed by this task.
+
+## 9. 2026-11-24 B2 update
+
+The proxy healthCheck described in section 8 (kill -0 only) was replaced. The current command proves both task-IP listeners, the app listener, the served certificate against the file, and the loopback liveness route; startPeriod is 300 s. See evidence-8080-api.md section 11.
+

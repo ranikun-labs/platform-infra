@@ -137,3 +137,75 @@ Not covered: the stub returns 404/501 for every path, so this still shows routin
 - `carelog.tfvars.example` parses with the merged required inputs (scratch copy, `terraform console`): `app_port_mappings` = `[]`, app env as above, proxy `healthCheck.command` = `["CMD-SHELL", "kill -0 $(cat /run/nginx.pid) || exit 1"]`, `logConfiguration` stream prefix `tls-proxy`.
 - Module path: `modules/ecs-service/main.tf` line 123 (`container_definitions = jsonencode(concat([...], var.additional_containers))`) passes candidate containers through raw, so the proxy's `logConfiguration` and `healthCheck` must be in the candidate input (done). The awslogs group `/ecs/ranikun-carelog-dev-api` equals the module's `aws_cloudwatch_log_group.service` name (`"/ecs/${var.name}"`), and the execution role already allows `logs:CreateLogStream`/`PutLogEvents` on it. No module change needed.
 - The TLS secret references and certificate/key/CA ARNs were not changed.
+
+## 11. 2026-11-24 B2: health check on the real listeners, single bundle, reproducibility
+
+### 11.1 Health design
+
+The ECS healthCheck (`task-fragments.json`, `carelog.tfvars.example`, Dockerfile HEALTHCHECK: the same string, checked byte-identical) proves, in order:
+1. nginx master alive (`kill -0 $(cat /run/nginx.pid)`).
+2. Task-IP listeners: TCP connect to `TASK_IP:8080` and `TASK_IP:8443`. The IP comes from the rendered `/etc/nginx/conf.d/default.conf` (no entrypoint change needed).
+3. App listener: TCP connect to `127.0.0.1:8080` (Carelog binds loopback only, `SERVER_ADDRESS=127.0.0.1`).
+4. Served certificate equals the file on disk: `openssl s_client` fingerprint on `TASK_IP:8443` against `/run/carelog-tls/server.crt`. Detects a listener serving a stale certificate after the file changed. It does not detect a reload with the wrong bundle.
+5. Application liveness through the proxy: `wget http://127.0.0.1:9180/healthz`. The loopback-only server (`nginx.conf`, first server block) proxies to `127.0.0.1:8081/actuator/health/liveness` (management liveness, no DB or Redis dependency).
+
+Why these choices:
+- `/api/v1/health` was rejected as the upstream: `SecurityConfig.java` `PUBLIC_URLS` does not contain it, and the application chain ends with `anyRequest().authenticated()`, so it answers 401 without a gateway header. The 401 would make every check fail.
+- Liveness rather than readiness: readiness includes DB and Redis indicators (`application-prod.yml` lines 99-101); a transient Redis outage would then restart a healthy proxy.
+- Loopback port 9180: 8080 and 8443 are the task-IP listeners, 8081 is the app management port, 8080 on loopback is the app. 9180 is not used by the app (`SERVER_PORT` default 8080, management 8081); the test checks it is bound to 127.0.0.1 only.
+- `startPeriod` 300 s, `interval` 30 s, `timeout` 10 s, `retries` 3. Observed app starts: 172.8 s, 161.4 s, 178.6 s (`Started CarelogApplication`, DEV logs 2026-11-21). ECS ignores failures inside `startPeriod`, so the proxy is not killed while the app starts.
+- The health route is not reachable from the task IP. `curl 127.0.0.2:9180/healthz` gives 000 (no listener on the task IP); `127.0.0.2:8080/healthz` and `:8443/healthz` give 403.
+
+Limits: the proxy check does not prove the upstream returns the right response for the 8080 routes (only that the listener accepts and the management liveness returns 2xx). A wrong bundle loaded by a nginx reload is not detected (served == file). The `kill -0` only proves the master process, the listener checks prove the sockets.
+
+### 11.2 Behaviour tested (test-proxy.sh health section)
+
+| Case | Expected | Result |
+| --- | --- | --- |
+| all listeners up, app and liveness up, cert matches | exit 0 | ok |
+| 8443 listener closed, master up (reloaded config) | exit 1 | ok; restore -> exit 0 ok |
+| 8080 task-IP listener closed | exit 1 | ok; restore -> exit 0 ok |
+| served certificate differs from file (file replaced, no reload) | exit 1 | ok; restore -> exit 0 ok |
+| app 127.0.0.1:8080 stopped | exit 1 | ok; restart -> exit 0 ok |
+| management liveness stopped (502 from health route) | exit 1 | ok; restart -> exit 0 ok |
+| `/healthz` on task IP 8080 and 8443 | 403 | ok |
+| `/healthz` on task IP 9180 | 000 (no listener) | ok |
+| 9180 listens only on 127.0.0.1 | yes | ok |
+
+### 11.3 Commands an external reviewer runs (PowerShell, from the worktree root)
+
+```powershell
+docker build -t carelog-dev-tls-candidate:local candidates/carelog-tls
+$t = (Resolve-Path candidates/carelog-tls/test-proxy.sh).Path
+$env:MSYS_NO_PATHCONV = '1'
+docker run --rm --entrypoint sh -v "${t}:/tmp/test-proxy.sh:ro" carelog-dev-tls-candidate:local /tmp/test-proxy.sh
+# or, host mode (image tag as argument; needs sh, e.g. Git Bash):
+sh candidates/carelog-tls/test-proxy.sh carelog-dev-tls-candidate:local
+$tf = 'C:\Users\aixio\Github\ranikun-dev-deploy-20261120\.tools\terraform.exe'   # or terraform on PATH
+Set-Location environments/dev/carelog
+& $tf fmt -check -recursive .
+& $tf init -backend=false -input=false
+& $tf validate
+& $tf test
+```
+
+Expected: docker build exit 0; test-proxy.sh exit 0 with last line `PASS: ...`, 80 `ok` lines and 0 `FAIL` lines; terraform fmt exit 0; validate "Success! The configuration is valid."; test "Success! 10 passed, 0 failed."
+
+### 11.4 Results (2026-11-24, local Docker Desktop, image rebuilt from commit 65ef0e7 plus this change)
+
+| Command | Result |
+| --- | --- |
+| `docker build` | exit 0 |
+| test-proxy.sh standalone (`--entrypoint sh`) | exit 0, 80 ok, 0 FAIL, PASS |
+| test-proxy.sh host mode (`sh test-proxy.sh <tag>`) | exit 0, 80 ok, 0 FAIL, PASS |
+| healthCheck string identical in task-fragments.json, carelog.tfvars.example, Dockerfile HEALTHCHECK (`docker image inspect`), and the heredoc in test-proxy.sh | identical (PowerShell comparison, `True` x3) |
+| `terraform fmt -check -recursive environments/dev/carelog` | exit 0 |
+| `terraform init -backend=false` / `validate` | valid |
+| `terraform test` (environments/dev/carelog) | 10 passed, 0 failed (includes 4 expect_failures validation cases: JSON-key ARN, separate cert/key secrets, startPeriod 30, two secret ARNs) |
+| carelog.tfvars.example via `terraform console` (merged with required inputs, scratch copy without backend) | `startPeriod` 300; `TLS_BUNDLE_JSON` is the only proxy secret; `app_port_mappings` = `[]` |
+
+### 11.5 Open questions
+
+- Real nc/openssl/wget behaviour on Fargate networking is verified only in this container (task-IP discovery from the rendered config, awsvpc single IP).
+- The proxy health check does not run `nginx -t` again; the entrypoint does that at start.
+- The bundle ARN in the test fixtures is a placeholder; the real ARN is supplied only in the protected inputs.

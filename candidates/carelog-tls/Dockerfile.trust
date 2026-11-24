@@ -1,16 +1,20 @@
-# Carelog DEV trust-init image. CORE_IMAGE MUST be the Core image by digest (repo@sha256:...).
+# Carelog DEV trust-init image. CORE_IMAGE MUST be the SAME Core image digest that the Core task
+# definition uses (repo@sha256:...). tests/check-core-digest.sh fails the build pipeline otherwise.
 # CA_BUNDLE_SRC is a path inside the build context to the PUBLIC Carelog DEV CA certificate bundle
-# (PEM, one or more CA certificates). It is public material: commit it or pass it as a build input.
+# (PEM, CA certificates only). It is public material: commit it or pass it as a build input.
 # It is never a secret, and the CA private key never enters the build.
 # Build: docker build -f Dockerfile.trust --build-arg CORE_IMAGE=<core>@sha256:<digest> \
 #          --build-arg CA_BUNDLE_SRC=ca/carelog-dev-ca-bundle.pem --build-arg SOURCE_SHA=<sha> .
 # hadolint global ignore=DL3002,DL3066
 ARG CORE_IMAGE
 FROM ${CORE_IMAGE}
+ARG CORE_IMAGE
 ARG SOURCE_SHA=unknown
 ARG CA_BUNDLE_SRC
+# Recorded so the base can be checked against the Core task definition without running the build.
 LABEL org.opencontainers.image.revision=$SOURCE_SHA \
-      org.opencontainers.image.title="carelog-trust-init"
+      org.opencontainers.image.title="carelog-trust-init" \
+      ranikun.carelog.core-base="${CORE_IMAGE}"
 COPY ${CA_BUNDLE_SRC} /usr/local/share/carelog/carelog-dev-ca-bundle.pem
 COPY trust-init.sh /usr/local/bin/trust-init
 # Root is needed only to write the task volume (/run/carelog-trust). The Core base image already runs as root.

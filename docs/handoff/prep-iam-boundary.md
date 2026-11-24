@@ -219,3 +219,47 @@ Simulation results (EvalDecision, `simulate-custom-policy`, 2026-11-24):
 Result: 12 of 12 match the expectation. Simulation covers boundary documents only. The Terraform inline policy (`terraform-*`) is separate and is generated from `execution_secret_arns` and `additional_ecr_repository_arns` (`environments/dev/platform/services.tf`, `environments/dev/carelog/main.tf`). Re-check the real ARNs with `simulate-principal-policy` after the secret exists.
 
 Owner, cost and rollback: as in section 3 (new policy version, `SetDefaultPolicyVersion`, rollback to v3). Two boundaries, each with v1-v3 today, so v4 fits the 5-version limit.
+
+## 10. Permission tests for the single-bundle design (2026-11-24, simulation only)
+
+Documents (committed as policy documents, no secret values): `candidates/carelog-tls/tests/iam/`.
+- `carelog-tls-boundary.json` and `core-tls-boundary.json`: the TLS statements of boundary v4 (the statements from section 9, plus the Carelog ECR control).
+- `terraform-carelog-execution.json` and `terraform-core-execution.json`: the execution policy the module renders from `execution_secret_arns` and the ECR ARNs (`modules/ecs-service/main.tf`: `GetSecretValue` plus `ssm:GetParameters` on the secret ARNs, ECR pull on the repositories). Hand-rendered from the reviewed inputs; the real rendered policy comes from the Terraform plan.
+- `rollback-operator.json`: the rollback operator. Stage moves and service updates on the Carelog service only, on the bundle only, plus `secretsmanager:*` **denied** on the enrollment Bearer secret.
+
+Run: `RUN_AWS_SIM=1 candidates/carelog-tls/tests/test-iam-sim.sh <proxy-image>` (27 checks, `iam:SimulateCustomPolicy` only, nothing changed). Result on 2026-11-24: **27 of 27 PASS**.
+
+| Document | Check | Decision |
+| --- | --- | --- |
+| Carelog boundary | proxy image pull | allowed |
+| Carelog boundary | bundle read | allowed |
+| Carelog boundary | enrollment Bearer read | allowed |
+| Carelog boundary | CA secret read (none in this design) | implicitDeny |
+| Carelog boundary | trust-init image pull | implicitDeny |
+| Core boundary | trust-init image pull | allowed |
+| Core boundary | enrollment Bearer read | allowed |
+| Core boundary | bundle read (**server key**) | implicitDeny |
+| Core boundary | CA secret read | implicitDeny |
+| Core boundary | proxy image pull | implicitDeny |
+| Terraform Carelog execution | bundle read | allowed |
+| Terraform Carelog execution | enrollment read | allowed |
+| Terraform Carelog execution | CA secret read | implicitDeny |
+| Terraform Core execution | bundle read (**server key**) | implicitDeny |
+| Terraform Core execution | enrollment read | allowed |
+| Terraform Core execution | trust-init pull | allowed |
+| Rollback operator | move AWSCURRENT on bundle | allowed |
+| Rollback operator | stage move on enrollment | explicitDeny |
+| Rollback operator | PutSecretValue on enrollment | explicitDeny |
+| Rollback operator | RestoreSecret on enrollment | explicitDeny |
+| Rollback operator | RotateSecret on enrollment | explicitDeny |
+| Rollback operator | DeleteSecret on enrollment | explicitDeny |
+| Rollback operator | GetSecretValue on enrollment | explicitDeny |
+| Rollback operator | PutSecretValue on bundle (not granted) | implicitDeny |
+| Rollback operator | UpdateService on Carelog service | allowed |
+| Rollback operator | UpdateService on Core service (not granted) | implicitDeny |
+| Static (jq) | no Allow statement in `rollback-operator.json` names the enrollment ARN | PASS |
+
+Limits:
+- Simulation evaluates each document on its own. The effective permission of an execution role is the intersection of its inline policy and its boundary. A live check needs `simulate-principal-policy` after the roles and policies exist (not done, not allowed yet).
+- The module's execution statement also grants `ssm:GetParameters` on the secret ARNs. That is broader than needed for Secrets Manager ARNs. It is the existing module behaviour, not changed here (noted for the platform owner).
+- The rollback operator's Deny must be attached to the operator's own permission set or role. A Deny in a different document does not apply to that principal.

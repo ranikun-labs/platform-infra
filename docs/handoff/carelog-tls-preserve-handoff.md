@@ -177,3 +177,40 @@ ECR repo 2개, Secret 1개, boundary v4 두 곳, OIDC 발행 역할, GitHub envi
 
 ### 9.5 열린 질문
 CA 오프라인 서명 담당, CA 이미지 포함에 대한 보안 수락 여부, CMK 요구 여부, boundary 담당자, DEV DB V9 적용 여부, 새 Carelog 이미지의 DEV 배포 승인자.
+
+## 10. 외부 검토 반영 (기준 65ef0e7): 수정·검증 요약과 재현 명령
+
+AWS 쓰기와 ECS 적용은 하지 않았다. 새 plan도 만들지 않았다(실제 이미지·Secret 참조 없음). 단일 Secret 설계를 유지했다.
+
+### 10.1 지적별 반영
+| 지적 | 반영 | 근거 |
+|---|---|---|
+| ① Core JVM 옵션·활성 프로필·기존 CA 보존, Core/trust-init 이미지 일치 | 라이브 Core `:3`은 `JAVA_TOOL_OPTIONS`와 `SPRING_PROFILES_ACTIVE`를 설정하지 않는다. 후보가 `SPRING_PROFILES_ACTIVE=dev`를 추가하던 것을 제거했다. `environments/dev/platform/core_env.tf`가 라이브 키를 보존하고(다른 값이면 plan 실패), `JAVA_TOOL_OPTIONS`는 병합한다. trust-init은 Core 이미지의 `cacerts`를 복사한 뒤 CA만 추가한다(기존 118개 별칭 모두 유지, 118→119·120). `Dockerfile.trust`가 `ARG CORE_IMAGE`와 OCI 라벨로 기반 digest를 기록하고 `tests/check-core-digest.sh`와 워크플로가 Core Task의 digest와 일치를 검사한다. | `prep-cert-secrets.md`, `tests/` |
+| ② 단일 번들 배포·이전 Secret 버전 복구 | `prep-cert-secrets.md` 11번(만들기 → 값 넣기 → 맨 ARN 참조 → 새 배포; 복구는 `update-secret-version-stage`로 `AWSCURRENT` 이동 + Task revision 롤백), `carelog-tls-ecs-rollout-rollback.md`를 단일 번들 기준으로 재작성. 가입용 Bearer Secret은 모든 단계에서 쓰기·삭제·교체·복원·버전 이동·읽기를 하지 않으며, 복구 담당 정책에 명시적 Deny가 있다. | 시뮬레이션 27건 |
+| ③ 실제 8080·8443 리스너 헬스 체크 | 프록시 헬스 체크가 8080, 8443 TLS 핸드셰이크(서버 인증서와 파일 일치), 앱 관리 liveness를 확인한다. 새 `/healthz`는 `127.0.0.1:9180`에서만 열린다. `startPeriod` 300초(앱 기동 161~179초 관측). Dockerfile, Task fragment, tfvars 예시, 테스트의 명령이 동일하다. | `evidence-8080-api.md` 11번 |
+| ④ 잘못된 PEM 즉시 실패, Secret 주입·권한 테스트 | 프록시: JSON 객체·두 키·단일 leaf·키/인증서 필드 뒤바뀜·`CA:FALSE`·만료·SAN(변수 `TLS_EXPECTED_DNS_SAN`)·짝 일치를 검사하고 값은 출력하지 않는다. trust-init: 빈 입력·텍스트·개인키·CA 아님·만료·PEM 괄호 불균형을 거부하고 실패 시 `cacerts`를 남기지 않는다. 주입 테스트는 ECS가 넣는 형태(원본 SecretString 한 줄)와 env-file에서 PEM이 바이트 동일하게 유지됨을 확인한다. | 아래 결과 |
+
+### 10.2 재현 명령 (Windows Git Bash 기준, 저장소 루트에서)
+```
+export AWS_PROFILE=ranikun-admin MSYS_NO_PATHCONV=1
+RUN_AWS_SIM=1 TERRAFORM=<terraform 경로> sh candidates/carelog-tls/tests/run-all.sh
+```
+- 필요한 것: Docker, 로컬에 있는 Core 이미지 digest(라이브 `sha256:ad9f84…`, 없으면 ECR 로그인 후 pull), 읽기 전용 AWS 프로필(IAM 시뮬레이션 단계). 생성 키·인증서는 임시 디렉터리에서 만들고 끝나면 지운다.
+- `RUN_AWS_SIM`을 빼면 IAM 시뮬레이션을 건너뛴다. `TERRAFORM`을 빼면 platform Terraform 단계를 건너뛴다. `SKIP_LINT=1`로 lint를 건너뛸 수 있다.
+- 프록시 테스트 단독: `sh candidates/carelog-tls/test-proxy.sh <이미지 태그>` 또는 컨테이너 안에서 인자 없이 실행(Git Bash에서는 `MSYS_NO_PATHCONV=1` 필요). 그 앞에서 `docker build -t <태그> candidates/carelog-tls`.
+- Terraform 단독: 각 `environments/dev/{carelog,platform,finance,shared}`에서 `terraform init -backend=false`, `fmt -check -recursive`, `validate`, `test`.
+
+### 10.3 결과 (이 문서 작성 시점의 작업 트리, 리드가 직접 실행)
+| 항목 | 결과 |
+|---|---|
+| `run-all.sh` (RUN_AWS_SIM=1, TERRAFORM 지정) | OVERALL PASS rc 0, 하위 검사 77 PASS / 0 FAIL |
+| 포함된 단계 | 프록시 빌드, Core 이미지 확인(라이브·이전), trust-init 빌드(라이브·이전), 기반 digest 검사, 프록시 엔트리포인트 16건, 주입 6건, trust-init 12건, JDK 신뢰, Core digest 5건, IAM 시뮬레이션 27건, Carelog `test-proxy.sh`, hadolint, shellcheck, actionlint, platform Terraform fmt/init/validate/test |
+| Terraform test | carelog 10, platform 7, finance 1, shared 2 건 모두 통과, `fmt -check` 네 루트 통과, `validate` 통과 |
+| `test-proxy.sh` (호스트 방식·컨테이너 방식) | 둘 다 PASS (80건) |
+
+### 10.4 한계와 열린 항목
+- 라이브 DEV state에 대한 `terraform plan`은 이번에 실행하지 않았다(실제 이미지·Secret 참조가 없고, Core 환경 변수 비교는 mock 기준이다).
+- 이전 준비 문서의 수치(117개)는 기반 이미지 `8353cec4…` 기준이었다. 라이브 Core `:3`의 이미지는 `ad9f84…`이고 `cacerts`가 118개다. trust-init은 반드시 라이브 digest를 기반으로 빌드한다.
+- 실제 ECS Secret 주입, Fargate 메타데이터 IP, 실제 CA 체인, Spring Boot 앱 테스트는 검증하지 못했다. 헬스 체크의 서버 인증서 비교는 오래된 리스너는 잡지만 잘못된 번들로 다시 로드된 경우는 못 잡는다.
+- IAM 시뮬레이션은 문서를 따로 평가한다. 실제 권한은 인라인 정책과 boundary의 교집합이다. 모듈이 Secret ARN에 `ssm:GetParameters`도 부여하는 기존 동작은 필요 이상으로 넓다.
+- 저장소 변수 `DEV_CORE_TASK_IMAGE`(Core Task의 digest)를 설정해야 초안 워크플로가 동작한다. 공개 CA 번들 파일 `candidates/carelog-tls/ca/carelog-dev-ca-bundle.pem`은 소유자가 커밋해야 한다. 복구 담당 정책과 Deny 연결 승인(`prep-aws-changes.md` 11행)이 필요하다.

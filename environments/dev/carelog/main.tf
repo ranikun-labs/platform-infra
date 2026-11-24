@@ -5,6 +5,13 @@ locals {
   # Explicit [] removes the app's 8080 mapping. null (the variable default) makes the module emit
   # containerPort 8080 for the app container, which would collide with the proxy on the task IP.
   app_port_mappings = var.enrollment_tls_candidate.app_port_mappings
+
+  # Secret references only (ARNs), never values. The enrollment bearer secret is referenced by ARN exactly as
+  # supplied in enrollment_secret_arn; nothing here creates, changes or rotates a secret.
+  app_secret_references   = merge(var.runtime.secrets, var.enrollment_secret_arn == null ? {} : { CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET = var.enrollment_secret_arn })
+  proxy_secret_references = { for s in flatten([for c in var.enrollment_tls_candidate.containers : try(c.secrets, [])]) : s.name => s.valueFrom }
+  execution_secret_arns   = setunion(var.runtime.execution_secret_arns, var.enrollment_tls_candidate.secret_arns, var.enrollment_secret_arn == null ? toset([]) : toset([var.enrollment_secret_arn]))
+  proxy_health_check      = try([for c in var.enrollment_tls_candidate.containers : c.healthCheck if c.name == "carelog-tls-proxy"][0], null)
 }
 
 module "service" {
@@ -27,8 +34,8 @@ module "service" {
   memory                                = var.runtime.memory
   desired_count                         = var.runtime.initial_desired_count
   environment                           = local.app_environment
-  secrets                               = merge(var.runtime.secrets, var.enrollment_secret_arn == null ? {} : { CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET = var.enrollment_secret_arn })
-  execution_secret_arns                 = setunion(var.runtime.execution_secret_arns, var.enrollment_tls_candidate.secret_arns, var.enrollment_secret_arn == null ? toset([]) : toset([var.enrollment_secret_arn]))
+  secrets                               = local.app_secret_references
+  execution_secret_arns                 = local.execution_secret_arns
   execution_kms_key_arns                = setunion(var.runtime.execution_kms_key_arns, var.enrollment_tls_candidate.kms_key_arns)
   additional_ecr_repository_arns        = var.enrollment_tls_candidate.ecr_repository_arns
   additional_volume_names               = setunion(var.runtime.additional_volume_names, var.enrollment_tls_candidate.volume_names)

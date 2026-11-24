@@ -3,7 +3,6 @@ enrollment_secret_arn = "REPLACE_WITH_ENROLLMENT_SECRET_ARN"
 enrollment_tls_candidate = {
   volume_names = ["carelog-trust"]
   environment = {
-    SPRING_PROFILES_ACTIVE = "dev"
     PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED = "true"
     PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED = "true"
     PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL = "https://ranikun-carelog-dev-api.dev.internal:8443"
@@ -18,6 +17,6 @@ enrollment_tls_candidate = {
     name = "carelog-trust-init"
     image = "REPLACE_WITH_INIT_IMAGE_BY_SHA256"
     essential = false
-    mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }]
+    mountPoints = [{ sourceVolume = "carelog-trust", containerPath = "/run/carelog-trust", readOnly = false }]
   }]
 }
