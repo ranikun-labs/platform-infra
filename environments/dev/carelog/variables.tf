@@ -161,7 +161,9 @@ variable "preserve" {
     assume_role_source_conditions         = optional(bool, false)
     service_discovery_custom_health_check = optional(bool, true)
     config_volume_name                    = optional(string)
-    core_claims_security_group_id         = optional(string)
+    # Keep the live Core claims rule (Core SG -> product port) only during the transition window. Clear this (null) after
+    # the Core claims path moves to the TLS listener; the rule is then deleted on the next apply. Record the planned clear date in the handoff doc.
+    core_claims_security_group_id = optional(string)
   })
   default = {}
   validation {
@@ -176,8 +178,8 @@ variable "preserve" {
   }
 }
 
-# Keep null. Overrides the Cloud Map and ECS service name (default dev-carelog). A different value renames live
-# resources, so the naming and state decision is pending.
+# Null keeps the main default name (dev-carelog). The live DEV service is ranikun-carelog-dev-api and is set only in
+# dev-live-preserve.auto.tfvars. Setting it renames the Cloud Map service, the ECS service and the log group together.
 variable "service_name_override" {
   type    = string
   default = null

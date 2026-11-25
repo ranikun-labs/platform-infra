@@ -28,6 +28,7 @@ preserve = {
   # Live config volume, mounted read-only at /run/secrets. Name from the live task definition (verify in the runbook).
   config_volume_name                    = "config-tree"
   # Core security group for the live Core-to-product-port claims rule (aws_vpc_security_group_ingress_rule.core_claims).
+  # Keep only for the transition window; set to null afterwards (the rule is then deleted on the next apply).
   core_claims_security_group_id         = "sg-0000000000000000b"
 }
 

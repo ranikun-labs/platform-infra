@@ -57,7 +57,7 @@ data "aws_iam_policy_document" "execution" {
   }
   statement {
     actions   = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
-    resources = concat([var.ecr_repository_arn], var.cloudflared == null ? [] : [var.cloudflared.ecr_repository_arn], tolist(var.additional_ecr_repository_arns))
+    resources = distinct(concat([var.ecr_repository_arn], var.cloudflared == null ? [] : [var.cloudflared.ecr_repository_arn], tolist(var.additional_ecr_repository_arns))) # distinct: a repo shared by app and sidecar is listed once
   }
   statement {
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
