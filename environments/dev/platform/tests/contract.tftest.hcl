@@ -472,3 +472,63 @@ run "preserve_rejects_non_policy_boundary" {
   }
   expect_failures = [var.core_preserve]
 }
+
+# Alternative Tunnel path: the live 2-container Gateway shape (app + cloudflared) from raw definitions, no ALB.
+run "gateway_sidecar_alternative_path_keeps_two_containers" {
+  command = plan
+
+  variables {
+    enable_alb             = false
+    certificate_arn        = null
+    alb_ingress_cidrs      = []
+    gateway_readiness_path = null
+    gateway_cloudflared    = null
+    gateway_additional_containers = [{
+      name      = "cloudflared"
+      image     = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      essential = true
+      command   = ["tunnel", "--no-autoupdate", "run"]
+    }]
+    gateway_additional_ecr_repository_arns = ["arn:aws:ecr:ap-northeast-2:111122223333:repository/cloudflared"]
+  }
+
+  assert {
+    condition     = length(jsondecode(module.gateway.baseline_container_definitions)) == 2 && [for c in jsondecode(module.gateway.baseline_container_definitions) : c.name][1] == "cloudflared"
+    error_message = "The alternative Tunnel path must give the Gateway task its app container plus one cloudflared sidecar."
+  }
+  assert {
+    condition     = length(aws_lb.gateway) == 0
+    error_message = "The alternative Tunnel path is for ALB-free DEV only."
+  }
+}
+
+run "sidecar_paths_are_exclusive" {
+  command = plan
+
+  variables {
+    enable_alb = false
+    gateway_additional_containers = [{
+      name  = "cloudflared"
+      image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }]
+    gateway_cloudflared = {
+      image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/cloudflared"
+      token_secret_arn   = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:test-tunnel-abcdef"
+    }
+  }
+  expect_failures = [var.gateway_cloudflared]
+}
+
+run "sidecar_images_must_be_digest_pinned" {
+  command = plan
+
+  variables {
+    enable_alb = false
+    gateway_additional_containers = [{
+      name  = "cloudflared"
+      image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared:latest"
+    }]
+  }
+  expect_failures = [var.gateway_additional_containers]
+}

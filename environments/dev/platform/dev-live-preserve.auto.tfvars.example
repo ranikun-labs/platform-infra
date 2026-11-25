@@ -29,6 +29,9 @@ gateway_cloudflared = {
   token_secret_arn   = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/platform/tunnel-REPLACE"
 }
 
+# Tunnel sidecar: default is gateway_cloudflared (module-built cloudflared container). If the live sidecar is not that
+# shape, set gateway_cloudflared = null and copy the live container as a raw definition into gateway_additional_containers
+# (digest-pinned image; ECR repo in gateway_additional_ecr_repository_arns). Never both. The runbook prints each container's image repo.
 gateway_preserve = {
   assign_public_ip                      = true
   execution_permissions_boundary_arn    = "arn:aws:iam::123456789012:policy/REPLACE-dev-boundary-execution"

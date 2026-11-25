@@ -77,3 +77,41 @@ run "dev_trusted_context_requires_secret_arn" {
   }
   expect_failures = [var.dev_trusted_context]
 }
+
+# Live preservation for the Finance service. Unset inputs keep the previous shape; set inputs reach the plan.
+run "preserve_defaults_match_previous_behavior" {
+  command = plan
+
+  assert {
+    condition     = var.preserve.assign_public_ip == false && var.preserve.service_discovery_custom_health_check == true && var.preserve.assume_role_source_conditions == false
+    error_message = "Unset preservation inputs must keep main's behavior."
+  }
+}
+
+run "live_preserve_inputs_plan" {
+  command = plan
+
+  variables {
+    preserve = {
+      assign_public_ip                      = true
+      execution_permissions_boundary_arn    = "arn:aws:iam::111122223333:policy/dev-boundary-execution"
+      task_permissions_boundary_arn         = "arn:aws:iam::111122223333:policy/dev-boundary-task"
+      assume_role_source_conditions         = true
+      service_discovery_custom_health_check = true
+    }
+  }
+
+  assert {
+    condition     = module.service.service_name != null && var.preserve.task_permissions_boundary_arn != null
+    error_message = "The Finance service must plan with the live preserve inputs."
+  }
+}
+
+run "preserve_rejects_non_policy_boundary" {
+  command = plan
+
+  variables {
+    preserve = { execution_permissions_boundary_arn = "dev-boundary-execution" }
+  }
+  expect_failures = [var.preserve]
+}

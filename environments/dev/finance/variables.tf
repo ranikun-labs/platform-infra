@@ -77,3 +77,23 @@ variable "workload_public_subnet_ids" {
     error_message = "Public IP tasks require explicit public subnets."
   }
 }
+
+# Live DEV preservation for the Finance service (same meaning as carelog's preserve). Defaults equal the module's
+# previous behavior; set only from live facts in dev-live-preserve.auto.tfvars.
+variable "preserve" {
+  description = "Live-service preservation inputs. Defaults reproduce the previous behavior."
+  type = object({
+    assign_public_ip                      = optional(bool, false)
+    execution_permissions_boundary_arn    = optional(string)
+    task_permissions_boundary_arn         = optional(string)
+    assume_role_source_conditions         = optional(bool, false)
+    service_discovery_custom_health_check = optional(bool, true)
+  })
+  default = {}
+  validation {
+    condition = alltrue([for a in [
+      var.preserve.execution_permissions_boundary_arn, var.preserve.task_permissions_boundary_arn,
+    ] : a == null || can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", a))])
+    error_message = "Permissions boundaries must be IAM policy ARNs."
+  }
+}

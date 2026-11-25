@@ -19,29 +19,33 @@ locals {
 }
 
 module "service" {
-  source                    = "../../../modules/ecs-service"
-  region                    = var.region
-  name                      = "dev-finance"
-  cluster_arn               = var.shared.cluster_arn
-  vpc_id                    = var.shared.vpc_id
-  private_subnet_ids        = var.workload_public_ip ? var.workload_public_subnet_ids : var.shared.private_subnet_ids
-  assign_public_ip          = var.workload_public_ip
-  namespace_id              = var.shared.namespace_id
-  image                     = var.runtime.image
-  ecr_repository_arn        = var.runtime.ecr_repository_arn
-  container_port            = var.runtime.container_port
-  cpu                       = var.runtime.cpu
-  memory                    = var.runtime.memory
-  desired_count             = var.runtime.initial_desired_count
-  environment               = local.container_environment
-  secrets                   = local.container_secrets
-  execution_secret_arns     = local.container_execution_arns
-  execution_kms_key_arns    = var.runtime.execution_kms_key_arns
-  app_policy_json           = var.runtime.app_policy_json
-  first_task_definition_arn = var.runtime.first_task_definition_arn
-  health_check              = var.runtime.health_check
-  log_retention_days        = var.runtime.log_retention_days
-  tags                      = var.tags
+  source                                = "../../../modules/ecs-service"
+  region                                = var.region
+  name                                  = "dev-finance"
+  cluster_arn                           = var.shared.cluster_arn
+  vpc_id                                = var.shared.vpc_id
+  private_subnet_ids                    = var.workload_public_ip ? var.workload_public_subnet_ids : var.shared.private_subnet_ids
+  assign_public_ip                      = var.workload_public_ip || var.preserve.assign_public_ip
+  execution_permissions_boundary_arn    = var.preserve.execution_permissions_boundary_arn
+  task_permissions_boundary_arn         = var.preserve.task_permissions_boundary_arn
+  assume_role_source_conditions         = var.preserve.assume_role_source_conditions
+  service_discovery_custom_health_check = var.preserve.service_discovery_custom_health_check
+  namespace_id                          = var.shared.namespace_id
+  image                                 = var.runtime.image
+  ecr_repository_arn                    = var.runtime.ecr_repository_arn
+  container_port                        = var.runtime.container_port
+  cpu                                   = var.runtime.cpu
+  memory                                = var.runtime.memory
+  desired_count                         = var.runtime.initial_desired_count
+  environment                           = local.container_environment
+  secrets                               = local.container_secrets
+  execution_secret_arns                 = local.container_execution_arns
+  execution_kms_key_arns                = var.runtime.execution_kms_key_arns
+  app_policy_json                       = var.runtime.app_policy_json
+  first_task_definition_arn             = var.runtime.first_task_definition_arn
+  health_check                          = var.runtime.health_check
+  log_retention_days                    = var.runtime.log_retention_days
+  tags                                  = var.tags
 }
 resource "aws_vpc_security_group_ingress_rule" "gateway" {
   security_group_id            = module.service.security_group_id

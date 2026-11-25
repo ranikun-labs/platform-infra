@@ -15,6 +15,9 @@ shared = {
 
 gateway_security_group_id = "sg-0000000000000000a"
 
+# Finance preserve (optional). Same fields as carelog preserve; add a preserve = { ... } block only from live facts
+# shown by the OFF plan. Defaults = main behavior.
+
 runtime = {
   image                 = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/finance/api@sha256:0000000000000000000000000000000000000000000000000000000000000000"
   ecr_repository_arn    = "arn:aws:ecr:ap-northeast-2:123456789012:repository/ranikun/finance/api"

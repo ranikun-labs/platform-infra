@@ -116,6 +116,8 @@ module "gateway" {
   log_retention_days                    = var.gateway_runtime.log_retention_days
   tags                                  = var.tags
   cloudflared                           = var.gateway_cloudflared
+  additional_containers                 = var.gateway_additional_containers
+  additional_ecr_repository_arns        = var.gateway_additional_ecr_repository_arns
   depends_on                            = [aws_lb_listener.https]
   execution_permissions_boundary_arn    = var.gateway_preserve.execution_permissions_boundary_arn
   task_permissions_boundary_arn         = var.gateway_preserve.task_permissions_boundary_arn
