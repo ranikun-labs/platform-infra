@@ -67,3 +67,42 @@ openssl ca -selfsign -batch -config ca.cnf -keyfile expired-ca.key -in expired-c
   -extfile expired-ca.ext -startdate 20200101000000Z -enddate 20210101000000Z -notext >/dev/null 2>&1
 rm -f expired-ca.csr expired-ca.ext
 cp expired-ca.crt expired-ca-bundle.pem
+
+# Two-tier material (test only). ca.crt plays the public root. Every name below is generated with openssl x509 -req.
+NC_ISS="critical,permitted;DNS:.test.internal,permitted;DNS:$SAN,excluded;IP:0.0.0.0/0.0.0.0,excluded;IP:0:0:0:0:0:0:0:0/0:0:0:0:0:0:0:0"
+ec_key() { openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$1.key" 2>/dev/null; chmod 600 "$1.key"; }
+sign() {  # name issuer-crt issuer-key subject-cn san-or-empty ext-lines(\n-separated)   -> $name.crt
+  name=$1; ic=$2; ik=$3; cn=$4; san=$5; extra=$6
+  ec_key "$name"
+  openssl req -new -key "$name.key" -subj "/CN=$cn" -out "$name.csr" 2>/dev/null
+  { printf '%s\n' "authorityKeyIdentifier=keyid" "subjectKeyIdentifier=hash"
+    [ -n "$extra" ] && printf '%b\n' "$extra"
+    [ -n "$san" ] && printf '%s\n' "subjectAltName=$san"; } > "$name.ext"
+  openssl x509 -req -in "$name.csr" -CA "$ic" -CAkey "$ik" -set_serial "0x$(openssl rand -hex 8)" -days 90 -sha256 \
+    -extfile "$name.ext" -out "$name.crt" 2>/dev/null
+  rm -f "$name.csr" "$name.ext"
+}
+sign inter ca.crt ca.key carelog-dev-issuing-ca "" \
+  "basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nnameConstraints=$NC_ISS"
+sign good2 inter.crt inter.key "$SAN" "DNS:$SAN" \
+  "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth"
+sign evil2 inter.crt inter.key evil.example.org "DNS:evil.example.org" \
+  "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth"
+sign inter-pathlen1 ca.crt ca.key carelog-dev-issuing-ca "" \
+  "basicConstraints=critical,CA:TRUE,pathlen:1\nkeyUsage=critical,keyCertSign,cRLSign\nnameConstraints=$NC_ISS"
+sign inter-nonc ca.crt ca.key carelog-dev-issuing-ca "" \
+  "basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout alien-root.key -out alien-root.crt \
+  -days 3650 -subj "/CN=carelog-alien-root" -addext "basicConstraints=critical,CA:TRUE" 2>/dev/null
+sign alien-inter alien-root.crt alien-root.key carelog-alien-issuing "" \
+  "basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nnameConstraints=$NC_ISS"
+
+cat good2.crt inter.crt > chain-twotier.crt
+jq -n --rawfile c chain-twotier.crt --rawfile k good2.key '{tls_certificate: $c, tls_private_key: $k}' > bundle-twotier.json
+chmod 600 bundle-twotier.json
+cat good2.crt inter.crt ca.crt > chain-three.crt
+cat good2.crt inter-pathlen1.crt > chain-pathlen1.crt
+cat good2.crt inter-nonc.crt > chain-nonc.crt
+cat good2.crt alien-inter.crt > chain-alien.crt
+cat evil2.crt inter.crt > chain-outside.crt
+cat good2.crt inter.crt inter.key > chain-with-ca-key.crt

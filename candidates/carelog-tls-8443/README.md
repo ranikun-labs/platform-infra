@@ -79,70 +79,81 @@ Requests are forwarded raw (`proxy_pass` to the `carelog_app` upstream, no URI p
   string, because the path carries the account UUID. A 403 is diagnosed from the source, not from the log.
 - **Body limit:** 4 KB on 8443.
 
-## 4. TLS bundle and the DEV CA (self-managed, `ca/`)
+## 4. TLS bundle and the DEV CA (self-managed two-tier, `ca/`)
 
-**Decision: self-managed DEV CA, not ACM Private CA.** The CA is an offline root on an operator host. Nothing in CI, the repo, a
-task volume or a task-readable secret holds its key. ACM PCA is not used.
+**Decision: self-managed DEV CA, two tiers, not ACM Private CA.** The root is offline. The issuing CA signs the 90-day
+leaves on the issuing host. Neither key is in the repo, a task volume, Secrets Manager, or CI.
 
-**TLS bundle** (`ranikun/dev/carelog/enrollment-tls/server-bundle`, one Secrets Manager string, JSON):
+**Tiers:**
+
+- **Root** (`root.crt`, 730 days): `CA:TRUE, pathlen:1`, `keyUsage keyCertSign,cRLSign`, critical nameConstraints. Its only job is
+  to sign the issuing CA. Only `root.crt` goes into trust-init (`ca-bundle.pem`). Core trusts the root, and nothing else.
+- **Issuing CA** (`issuing.crt`, 365 days): `CA:TRUE, pathlen:0`, the same critical nameConstraints. Signs the leaves.
+  Never trusted by Core directly. It travels in the served chain, and the JDK enforces the constraints on it.
+- **Leaf** (90 days): `CA:FALSE`, `EKU serverAuth`, `SAN=TLS_EXPECTED_DNS_SAN`.
+
+**Bundle** (`ranikun/dev/carelog/enrollment-tls/server-bundle`, one Secrets Manager string, JSON):
 
 ```json
-{ "tls_certificate": "-----BEGIN CERTIFICATE-----\n...leaf only...\n-----END CERTIFICATE-----\n",
-  "tls_private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n" }
+{ "tls_certificate": "-----BEGIN CERTIFICATE-----\n...leaf...\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\n...issuing CA...\n-----END CERTIFICATE-----\n",
+  "tls_private_key": "-----BEGIN PRIVATE KEY-----\n...leaf key...\n-----END PRIVATE KEY-----\n" }
 ```
 
-The entrypoint requires exactly one certificate, a leaf, with a SAN equal to `TLS_EXPECTED_DNS_SAN` and a matching key.
-`TLS_EXPECTED_DNS_SAN` has no default. It is `<service_name>.<namespace_name>`, and Core's URL uses the same name.
+The chain is leaf first, then the issuing CA. Only the leaf key is in the bundle. No CA key is ever in it.
+
+**Proxy entrypoint inputs:** `TLS_BUNDLE_JSON` (above), `TLS_EXPECTED_DNS_SAN` (no default), `TLS_ROOT_CA_PEM` (the public
+root, an ordinary environment variable, required), and `TWO_TIER_REQUIRED` (default `true`; `false` is a transition switch that
+accepts a leaf alone, still verified to the root). The entrypoint refuses: a key in the certificate field, three or more
+certificates, a leaf alone while two-tier is required, an issuing CA that is not `CA:TRUE, pathlen:0` with critical
+nameConstraints, an expired issuing CA, a chain that does not verify to `TLS_ROOT_CA_PEM` for the expected name, and a root
+PEM that holds a key or a non-CA. The name constraints are applied by `openssl verify` as well as by the JDK.
 
 **Scripts:**
 
-- `ca/make-root.sh`: `NAMESPACE`, `SERVICE_HOST`, `OUT_DIR`. Creates an ECDSA P-256 root, valid 730 days, with
-  `basicConstraints=critical,CA:TRUE,pathlen:0`, `keyUsage=critical,keyCertSign,cRLSign`, and
-  `nameConstraints=critical` with permitted `DNS:.<namespace>` and `DNS:<service host>` and excluded `IP:0.0.0.0/0` and `IP:::/0`.
-  Writes `root.key` (0600), `root.crt`, `ca-bundle.pem` (public, for trust-init) and `constraints.env`.
-  It refuses an `OUT_DIR` inside the git worktree and a non-empty `OUT_DIR`.
-- `ca/issue-leaf.sh`: `CA_DIR`, `HOST`, `OUT_DIR`. Issues a 90-day leaf (`CA:FALSE`, `EKU serverAuth`, `SAN=HOST`,
-  `keyUsage=digitalSignature`). Refuses a `HOST` outside the constraints in `constraints.env`. Verifies the chain before writing.
-  Writes `leaf.crt`, `leaf.key` (0600) and `bundle.json` (0600, the two-field Secrets Manager shape).
-  The leaf key is generated on the operator host and never leaves `OUT_DIR`.
+- `ca/make-root.sh` (`NAMESPACE`, `SERVICE_HOST`, `OUT_DIR`): creates the root and the issuing CA, both with the same
+  constraints (`permitted DNS:.<namespace>` and `DNS:<service host>`, `excluded IP:0.0.0.0/0` and `IP:::/0`). Writes `root.key`,
+  `issuing.key` (both 0600), `root.crt`, `issuing.crt`, `ca-bundle.pem` (= root) and `constraints.env`. It refuses an `OUT_DIR`
+  inside the worktree and a non-empty one.
+- `ca/issue-leaf.sh` (`CA_DIR`, `HOST`, `OUT_DIR`): signs a 90-day leaf with the issuing CA. Refuses a `HOST` outside the
+  constraints. Verifies the chain to `root.crt` with the issuing CA as intermediate and the SAN host, then writes `leaf.crt`,
+  `leaf.key` (0600) and `bundle.json` (0600, chain = leaf + issuing CA).
 
-**Finding: nameConstraints is not enforced by the JDK on a trust anchor.** `test-selfca.sh` measures this, with JDK 17 HttpClient:
+**Measured results (JDK 17 HttpClient, trust store = trust-init output from `ca-bundle.pem` only; `test-selfca.sh`):**
 
-| Chain shape (truststore holds only the root) | Leaf for `evil.example.org` | IP-SAN leaf `127.0.0.2` |
-| --- | --- | --- |
-| root issues leaf directly (the shipped `make-root` + `issue-leaf` shape) | accepted (rc 0): constraint not applied | accepted (rc 0): constraint not applied |
-| root -> constrained issuing CA (pathlen 0) -> leaf, server sends leaf + issuing CA | **refused** (rc 2) | not tested in the two-tier case |
+| Served chain | Result |
+| --- | --- |
+| leaf + issuing CA, for the SAN host | accepted (200) |
+| same chain, served as the SAN host but leaf names a sibling in the namespace | refused: no SAN matching the host (hostname verification) |
+| leaf for `evil.example.org` signed by the issuing CA | **refused**: name constraints (`PKIX path validation failed`) |
+| IP-SAN leaf `127.0.0.2` signed by the issuing CA | **refused**: name constraints (excluded IP) |
+| leaf for `evil.example.org` issued directly by the root (no issuing CA in the chain) | accepted (200): the root's constraints are not applied to a direct leaf |
 
-So the root's nameConstraints, as shipped, are documentation and not a control. To make the constraint enforceable, the
-constrained CA must be an intermediate that the server sends in the chain. **This is a follow-up, not done here:** the
-entrypoint currently requires exactly one certificate, so it would need to accept leaf + issuing CA (with the leaf first and
-only CA certificates after it). That change, its negative tests and a rotation to a two-tier layout are a separate task.
-Until then, the trust boundary is the operator process and the key custody, not the name constraint.
+So the constraint is a control only when the constrained CA sits in the served chain, which the two-tier layout guarantees.
+Name constraints do not stop in-namespace siblings. Hostname verification does.
 
-The in-namespace sibling case is also measured. A leaf for `other.test.internal`, signed by the same root, is accepted for its
-own name (the namespace is allowed) and refused when presented for `carelog-dev.test.internal` (hostname mismatch). Name
-constraints do not stop in-namespace siblings. Hostname verification does.
-
-**Trust-init:** only `ca-bundle.pem` goes into the image (`CA_BUNDLE=... build/build-images.sh`). It is public. trust-init
-accepts a root with `CA:TRUE` and a valid date, and the store grows by one (tested).
+**External host (`pypi.org`, through the agent CONNECT proxy):** the JDK default truststore and the trust-init store both return
+200 with the same body. The derived store only adds one CA (store 120 -> 121, base unchanged). Result: unaffected, measured for this host only.
 
 **Custody:**
 
-- After `make-root.sh`, move `root.key` to offline storage (password-manager attachment or encrypted offline medium). Keep
-  one tested copy off the operator host. Then delete the host copy (Linux: `shred -u`; macOS: `rm -P`).
-- Never store `root.key` in the repo, a task volume, Secrets Manager or CI variables.
-- `issue-leaf.sh` needs the key on the issuing host only for the duration of issuance.
+- After `make-root.sh`, move `root.key` offline (encrypted medium or password-manager attachment, with one tested copy off the host),
+  then delete the host copy (Linux: `shred -u`; macOS: `rm -P`). The root key is needed only to sign a new issuing CA.
+- `issuing.key` stays on the issuing host in a restricted directory. It signs every leaf. It is never in the bundle, the repo,
+  Secrets Manager or CI. Back it up with the same care as the root key.
 
 **Rotation:**
 
-- **Leaf (every 90 days):** on the operator host, `CA_DIR=<root dir> HOST=<SAN> OUT_DIR=<new empty dir> ca/issue-leaf.sh`.
-  Put `bundle.json` as a new version of the bundle secret (`aws secretsmanager put-secret-value --secret-id <ARN> --secret-string file://bundle.json`).
-  Force a new proxy deployment, because the entrypoint reads at start. Shred `leaf.key` and `bundle.json` locally after the put.
-  Alert at 30 days before `notAfter`. The entrypoint fails closed on an expired leaf.
-- **Root (every 2 years, or on suspected compromise):** `make-root.sh` into a new `OUT_DIR`. Build a trust-init image that holds
-  both the old and new `ca-bundle` certificates (`CA_BUNDLE` accepts a multi-certificate PEM). Roll Core to that image. Issue
-  new leaves from the new root. Roll the proxy. After the last old leaf expires, remove the old root from the bundle and rebuild.
-  On compromise, skip the overlap: remove the old root from the bundle at once, roll Core and the proxy, and accept the outage.
+- **Leaf (every 90 days):** on the issuing host, `CA_DIR=<dir> HOST=<SAN> OUT_DIR=<new empty dir> ca/issue-leaf.sh`. Put
+  `bundle.json` as a new version of the bundle secret (`aws secretsmanager put-secret-value --secret-id <ARN> --secret-string file://bundle.json`).
+  Force a new proxy deployment, because the entrypoint reads at start. Shred `leaf.key` and `bundle.json` locally. Alert 30 days
+  before `notAfter`. The entrypoint fails closed on an expired leaf or an expired issuing CA.
+- **Issuing CA (every year):** on the root host, sign a new issuing CA with `root.key` (the script `make-root.sh` writes both; a
+  dedicated issuing-only path is a follow-up). Both the old and new issuing CA verify to the same root, so no trust-init change is
+  needed. Issue new leaves from the new issuing CA, roll the proxy with the new bundle. Retire the old issuing CA after the last old leaf expires.
+- **Root (every 2 years, or on compromise):** `make-root.sh` into a new `OUT_DIR`. Build a trust-init image whose bundle holds both
+  roots (`CA_BUNDLE` takes a multi-certificate PEM). Roll Core to that image, then issue from the new chain and roll the proxy.
+  Remove the old root after the last old chain expires. On compromise: remove the old root from the bundle at once, roll Core and
+  the proxy, and accept the outage.
 
 ## 5. Minimal IAM boundary
 
@@ -234,17 +245,17 @@ The new proxy with an app still on loopback leaves Gateway without a route on 80
 
 ## 8. Test evidence (this sandbox)
 
-`tests/run-all.sh` (host mode, host nginx 1.24, JDK 17): **97 of 97**.
+`tests/run-all.sh` (host mode, host nginx 1.24, JDK 17): **114 of 114**.
 
-- `test-entrypoint-negative.sh`: 11 of 11 (wrong SAN, other-SAN cert, expired, swapped fields, CA in leaf slot, key mismatch,
+- `test-entrypoint-negative.sh`: 23 of 23 (wrong SAN, other-SAN cert, expired, swapped fields, CA in leaf slot, key mismatch,
   chain in cert slot, wildcard name, empty name, non-JSON bundle; valid bundle reaches the metadata fetch).
 - `test-trust-init.sh`: 10 of 10 in host mode, plus 3 in Docker mode (`DOCKER=1`, stand-in base): 13 of 13 in that mode.
 - `test-proxy-host.sh`: 40 of 40. Allowed enrollment PUT and claims GET (query strings with `;//` and `..` pass). Denials
   with JSON bodies: 403 (path variants, `%`, `#`, dot segments, identifiers), 413 over 4 KB, 421 for a mismatched Host.
   No proxy listener on task IP:8080. JDK client: enrollment and claims pass with SAN and hostname verified; default truststore refuses.
-- `test-selfca.sh`: 36 of 36. Root and leaf properties, script guards (inside-worktree, non-empty dir, out-of-constraint host,
+- `test-selfca.sh`: 41 of 41. Root, issuing CA and leaf properties, script guards (inside-worktree, non-empty dir, out-of-constraint host,
   reuse), trust-init on the public root, JDK cases (accepted SAN host, sibling hostname refused, sibling in-namespace accepted),
-  two-tier outside name refused, and the two recorded anchor-direct findings from section 4.
+  two-tier outside name refused, the Java name-constraint refusals for the issuing CA, the external host comparison, and the one recorded root-direct finding from section 4.
 - Also run in this lane: the proxy template under the pinned `nginx:1.27.5` image (`nginx -t` OK, smoke test on host
   networking). The results matched host nginx.
 
@@ -257,13 +268,12 @@ is decoded before matching. The path-only deny denies any `%`, so the fix holds.
   `jq=1.8.2-r0` and `openssl=3.3.7-r2` failed. The base image is Alpine 3.21.3. Whether those pins exist on that branch is unknown.
 - The Core image and carelog-be were not run. The app loopback check, the claims flag, the app bind and the
   `MANAGEMENT_SERVER_ADDRESS` override are carelog-be's, and nothing here tests them.
-- The two-tier chain (section 4) is measured in the test PKI only. The entrypoint change it needs is not implemented.
+- The two-tier chain (section 4) is measured with the test PKI and JDK only. It has not been measured against a real Core image or a real AWS bundle.
 - Nothing was run against AWS. No deploy, no Terraform, no IAM apply. The IAM snippets are unverified against the account.
 
 ## 9. Reviewer checklist
 
 - Confirm carelog-be's loopback check ships before or with this proxy (section 1, sequencing blocker).
-- Decide whether to implement the two-tier chain (section 4). Without it the root's name constraints are not a control.
 - Confirm `MANAGEMENT_SERVER_ADDRESS` overrides `management.server.address` in carelog-be (section 2).
 - Confirm with the Core owner the 5xx retry policy for the idempotent enrollment PUT (section 3).
 - Confirm no tunnel or relay container is added to the carelog task (section 2 invariant).

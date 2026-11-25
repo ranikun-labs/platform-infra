@@ -2,7 +2,7 @@
 // trust-init) and explicit HTTPS endpoint identification, so a SAN or hostname mismatch fails like it would in Core.
 // Usage: java TlsClient.java <METHOD> <URL> <truststore|-> <expected-status> [headers as Name=Value ...]
 // Prints "STATUS <code> <first 120 chars of body>" and exits 0 when the status matches, 1 otherwise, 2 on TLS/transport error.
-// Secrets in headers are test values only.
+// Secrets in headers are test values only. TLSCLIENT_PROXY=host:port (optional env) uses an HTTP CONNECT proxy.
 import java.io.FileInputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -22,6 +22,13 @@ public class TlsClient {
         int expected = Integer.parseInt(args[3]);
 
         HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10));
+        // Optional: TLSCLIENT_PROXY=host:port routes the request through an HTTP CONNECT proxy (external-host measurement only).
+        String proxy = System.getenv("TLSCLIENT_PROXY");
+        if (proxy != null && !proxy.isEmpty()) {
+            int colon = proxy.lastIndexOf(':');
+            builder.proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(
+                proxy.substring(0, colon), Integer.parseInt(proxy.substring(colon + 1)))));
+        }
         if (uri.getScheme().equals("https")) {
             SSLContext ctx;
             if (trust.equals("-")) {

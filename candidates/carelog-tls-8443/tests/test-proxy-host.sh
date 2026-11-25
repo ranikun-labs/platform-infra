@@ -119,7 +119,7 @@ start_proxy() {
   stop_proxy
   rm -f "$WORK/proxy/nginx.pid"
   env ECS_CONTAINER_METADATA_URI_V4="http://127.0.0.1:$META_PORT" \
-    TLS_EXPECTED_DNS_SAN="$SAN" TLS_BUNDLE_JSON="$(jq -c . "$PKI/bundle-good.json")" \
+    TLS_EXPECTED_DNS_SAN="$SAN" TLS_BUNDLE_JSON="$(jq -c . "$PKI/bundle-twotier.json")" TLS_ROOT_CA_PEM="$(cat "$PKI/ca.crt")" \
     CARELOG_NGINX_DIR="$WORK/proxy/nginx" CARELOG_TLS_RUN_DIR="$WORK/proxy/tls" \
     sh "$HERE/proxy/proxy-entrypoint.sh" >"$WORK/proxy/entry.log" 2>&1 &
   PROXY_PID=$!
