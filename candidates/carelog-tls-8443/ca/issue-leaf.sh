@@ -22,7 +22,19 @@ DAYS=${DAYS:-90}
 for f in root.crt issuing.crt issuing.key constraints.env; do
   [ -f "$CA_DIR/$f" ] || fail "CA_DIR has no $f"
 done
-. "$CA_DIR/constraints.env"
+# constraints.env is data, not code: only NAMESPACE and SERVICE_HOST are read, each value must be a plain DNS name.
+NAMESPACE= SERVICE_HOST=
+while IFS='=' read -r k v; do
+  case "$k" in
+    NAMESPACE) NAMESPACE=$v ;;
+    SERVICE_HOST) SERVICE_HOST=$v ;;
+    '') ;;
+    *) fail "constraints.env has an unexpected key" ;;
+  esac
+done < "$CA_DIR/constraints.env"
+plain_dns() { printf '%s' "$1" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'; }
+plain_dns "$NAMESPACE" || fail "constraints.env NAMESPACE is not a plain DNS name"
+plain_dns "$SERVICE_HOST" || fail "constraints.env SERVICE_HOST is not a plain DNS name"
 
 mode=$(stat -c %a "$CA_DIR/issuing.key" 2>/dev/null || stat -f %Lp "$CA_DIR/issuing.key")
 case "$mode" in 600|400) ;; *) fail "issuing.key mode is $mode; expected 600" ;; esac
@@ -34,10 +46,15 @@ case "$HOST" in
   *) fail "HOST is outside the CA constraints (namespace $NAMESPACE, service host $SERVICE_HOST)" ;;
 esac
 
-REPO=$(git -C "$(cd "$(dirname "$0")" && pwd)" rev-parse --show-toplevel 2>/dev/null || true)
+# OUT_DIR guard: resolve symlinks and '..' (GNU realpath -m), then refuse if the nearest existing ancestor lies
+# inside ANY git repository. The check is on the output location, so a copy of this script outside git is still covered.
+command -v realpath >/dev/null 2>&1 || fail "GNU realpath is required (coreutils)"
 case "$OUT_DIR" in /*) ;; *) fail "OUT_DIR must be an absolute path" ;; esac
-if [ -n "$REPO" ]; then
-  case "$OUT_DIR" in "$REPO"|"$REPO"/*) fail "OUT_DIR is inside the git worktree; choose a path outside it" ;; esac
+OUT_DIR=$(realpath -m -- "$OUT_DIR")
+p=$OUT_DIR
+while [ ! -e "$p" ] && [ "$p" != "/" ]; do p=$(dirname "$p"); done
+if git -C "$p" rev-parse --show-toplevel >/dev/null 2>&1; then
+  fail "OUT_DIR is inside a git repository; choose a path outside every repo"
 fi
 
 mkdir -p "$OUT_DIR"

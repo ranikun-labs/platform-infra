@@ -25,12 +25,15 @@ plain_dns "$NAMESPACE" || fail "NAMESPACE must be a lower-case DNS name with at 
 plain_dns "$SERVICE_HOST" || fail "SERVICE_HOST must be a lower-case DNS name"
 case "$SERVICE_HOST" in *".$NAMESPACE") ;; *) fail "SERVICE_HOST must end with .$NAMESPACE" ;; esac
 
-# The CA keys must never land inside a git worktree.
-HERE=$(cd "$(dirname "$0")" && pwd)
-REPO=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)
+# OUT_DIR guard: resolve symlinks and '..' (GNU realpath -m), then refuse if the nearest existing ancestor lies
+# inside ANY git repository. The check is on the output location, so a copy of this script outside git is still covered.
+command -v realpath >/dev/null 2>&1 || fail "GNU realpath is required (coreutils)"
 case "$OUT_DIR" in /*) ;; *) fail "OUT_DIR must be an absolute path" ;; esac
-if [ -n "$REPO" ]; then
-  case "$OUT_DIR" in "$REPO"|"$REPO"/*) fail "OUT_DIR is inside the git worktree; choose a path outside it" ;; esac
+OUT_DIR=$(realpath -m -- "$OUT_DIR")
+p=$OUT_DIR
+while [ ! -e "$p" ] && [ "$p" != "/" ]; do p=$(dirname "$p"); done
+if git -C "$p" rev-parse --show-toplevel >/dev/null 2>&1; then
+  fail "OUT_DIR is inside a git repository; choose a path outside every repo"
 fi
 
 mkdir -p "$OUT_DIR"

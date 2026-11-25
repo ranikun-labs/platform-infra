@@ -103,7 +103,8 @@ The chain is leaf first, then the issuing CA. Only the leaf key is in the bundle
 
 **Proxy entrypoint inputs:** `TLS_BUNDLE_JSON` (above), `TLS_EXPECTED_DNS_SAN` (no default), `TLS_ROOT_CA_PEM` (the public
 root, an ordinary environment variable, required), and `TWO_TIER_REQUIRED` (default `true`; `false` is a transition switch that
-accepts a leaf alone, still verified to the root). The entrypoint refuses: a key in the certificate field, three or more
+accepts a leaf alone, still verified to the root). The leaf must be signed by the issuing CA that was sent (`openssl verify -partial_chain`), not only by the root. A root-signed
+leaf sent with an issuing CA is refused. The entrypoint refuses: a key in the certificate field, three or more
 certificates, a leaf alone while two-tier is required, an issuing CA that is not `CA:TRUE, pathlen:0` with critical
 nameConstraints, an expired issuing CA, a chain that does not verify to `TLS_ROOT_CA_PEM` for the expected name, and a root
 PEM that holds a key or a non-CA. The name constraints are applied by `openssl verify` as well as by the JDK.
@@ -112,11 +113,18 @@ PEM that holds a key or a non-CA. The name constraints are applied by `openssl v
 
 - `ca/make-root.sh` (`NAMESPACE`, `SERVICE_HOST`, `OUT_DIR`): creates the root and the issuing CA, both with the same
   constraints (`permitted DNS:.<namespace>` and `DNS:<service host>`, `excluded IP:0.0.0.0/0` and `IP:::/0`). Writes `root.key`,
-  `issuing.key` (both 0600), `root.crt`, `issuing.crt`, `ca-bundle.pem` (= root) and `constraints.env`. It refuses an `OUT_DIR`
-  inside the worktree and a non-empty one.
+  `issuing.key` (both 0600), `root.crt`, `issuing.crt`, `ca-bundle.pem` (= root) and `constraints.env`. `OUT_DIR` is resolved
+  with GNU `realpath -m` (so `..` and symlinks count) and refused if its nearest existing ancestor lies inside ANY git
+  repository. A non-empty `OUT_DIR` is refused. The guard applies to a copy of the script run outside git too.
 - `ca/issue-leaf.sh` (`CA_DIR`, `HOST`, `OUT_DIR`): signs a 90-day leaf with the issuing CA. Refuses a `HOST` outside the
   constraints. Verifies the chain to `root.crt` with the issuing CA as intermediate and the SAN host, then writes `leaf.crt`,
-  `leaf.key` (0600) and `bundle.json` (0600, chain = leaf + issuing CA).
+  `leaf.key` (0600) and `bundle.json` (0600, chain = leaf + issuing CA). `constraints.env` is read as a key=value allowlist
+  (`NAMESPACE`, `SERVICE_HOST`), never sourced; any other key or a non-DNS value is refused.
+
+**Trust-init:** only `ca-bundle.pem` goes into the image (`CA_BUNDLE=... build/build-images.sh`). trust-init accepts only a
+self-issued root (owner equals issuer) with `CA:TRUE, pathlen:1` and a valid date. An issuing CA or any intermediate in the
+bundle is refused, and so is a root without pathlen. `build-images.sh` checks the self-signature with openssl on the build
+host before any image build, because the Core base image is not assumed to have openssl. Tested.
 
 **Measured results (JDK 17 HttpClient, trust store = trust-init output from `ca-bundle.pem` only; `test-selfca.sh`):**
 
@@ -245,15 +253,15 @@ The new proxy with an app still on loopback leaves Gateway without a route on 80
 
 ## 8. Test evidence (this sandbox)
 
-`tests/run-all.sh` (host mode, host nginx 1.24, JDK 17): **114 of 114**.
+`tests/run-all.sh` (host mode, host nginx 1.24, JDK 17): **129 of 129**.
 
-- `test-entrypoint-negative.sh`: 23 of 23 (wrong SAN, other-SAN cert, expired, swapped fields, CA in leaf slot, key mismatch,
+- `test-entrypoint-negative.sh`: 25 of 25 (wrong SAN, other-SAN cert, expired, swapped fields, CA in leaf slot, key mismatch,
   chain in cert slot, wildcard name, empty name, non-JSON bundle; valid bundle reaches the metadata fetch).
-- `test-trust-init.sh`: 10 of 10 in host mode, plus 3 in Docker mode (`DOCKER=1`, stand-in base): 13 of 13 in that mode.
+- `test-trust-init.sh`: 14 of 14 in host mode (incl. issuing-CA and pathlen refusals, and the same refusals from build-images.sh), plus 3 in Docker mode (`DOCKER=1`, stand-in base).
 - `test-proxy-host.sh`: 40 of 40. Allowed enrollment PUT and claims GET (query strings with `;//` and `..` pass). Denials
   with JSON bodies: 403 (path variants, `%`, `#`, dot segments, identifiers), 413 over 4 KB, 421 for a mismatched Host.
   No proxy listener on task IP:8080. JDK client: enrollment and claims pass with SAN and hostname verified; default truststore refuses.
-- `test-selfca.sh`: 41 of 41. Root, issuing CA and leaf properties, script guards (inside-worktree, non-empty dir, out-of-constraint host,
+- `test-selfca.sh`: 50 of 50. Also covers the OUT_DIR guard (`..`, symlink into the worktree, copied script) and constraints.env refusals. Root, issuing CA and leaf properties, script guards (inside-worktree, non-empty dir, out-of-constraint host,
   reuse), trust-init on the public root, JDK cases (accepted SAN host, sibling hostname refused, sibling in-namespace accepted),
   two-tier outside name refused, the Java name-constraint refusals for the issuing CA, the external host comparison, and the one recorded root-direct finding from section 4.
 - Also run in this lane: the proxy template under the pinned `nginx:1.27.5` image (`nginx -t` OK, smoke test on host
@@ -270,6 +278,10 @@ is decoded before matching. The path-only deny denies any `%`, so the fix holds.
   `MANAGEMENT_SERVER_ADDRESS` override are carelog-be's, and nothing here tests them.
 - The two-tier chain (section 4) is measured with the test PKI and JDK only. It has not been measured against a real Core image or a real AWS bundle.
 - Nothing was run against AWS. No deploy, no Terraform, no IAM apply. The IAM snippets are unverified against the account.
+
+**CI stand-in base (not the Core digest):** `.github/workflows/carelog-tls-images.yml` builds trust-init on a public
+eclipse-temurin 17 JRE image, pinned by digest, because the real Core digest is not published yet. That exercises the
+Dockerfile and the store logic, not the real Core image. The real Core digest build is pending and must run before deploy.
 
 ## 9. Reviewer checklist
 

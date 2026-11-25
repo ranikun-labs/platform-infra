@@ -48,6 +48,19 @@ ROOT=$SELF/root
 refused_script "make-root refuses OUT_DIR inside the worktree" \
   NAMESPACE=$NS SERVICE_HOST=$SVC OUT_DIR="$HERE/ca/should-not-exist" sh "$HERE/ca/make-root.sh"
 [ ! -e "$HERE/ca/should-not-exist" ] && ok "no directory created inside the worktree" || bad "worktree dir created" ""
+# OUT_DIR guard: '..' and symlinks are resolved before the check; a copy of the script outside git is still guarded.
+refused_script "make-root refuses '..' path into the worktree" \
+  NAMESPACE=$NS SERVICE_HOST=$SVC OUT_DIR="$HERE/ca/../ca/traversal-check" sh "$HERE/ca/make-root.sh"
+[ ! -e "$HERE/ca/traversal-check" ] && ok "no directory created via '..' path" || bad "traversal dir created" ""
+ln -s "$HERE/ca" "$SELF/link-to-worktree"
+refused_script "make-root refuses a symlink that resolves into the worktree" \
+  NAMESPACE=$NS SERVICE_HOST=$SVC OUT_DIR="$SELF/link-to-worktree/symlink-check" sh "$HERE/ca/make-root.sh"
+[ ! -e "$HERE/ca/symlink-check" ] && ok "no directory created via symlink" || bad "symlink dir created" ""
+mkdir -p "$SELF/copied" && cp "$HERE/ca/make-root.sh" "$HERE/ca/issue-leaf.sh" "$SELF/copied/"
+refused_script "script copied outside git still refuses OUT_DIR inside the worktree" \
+  NAMESPACE=$NS SERVICE_HOST=$SVC OUT_DIR="$HERE/ca/should-not-exist" sh "$SELF/copied/make-root.sh"
+NAMESPACE=$NS SERVICE_HOST=$SVC OUT_DIR="$SELF/copied-root" sh "$SELF/copied/make-root.sh" > "$SELF/copied.out" 2>&1 \
+  && ok "copied script writes an operator directory outside every repo" || bad "copied script outside repo" "$(tail -1 "$SELF/copied.out")"
 refused_script "make-root refuses SERVICE_HOST outside NAMESPACE" \
   NAMESPACE=$NS SERVICE_HOST=carelog-dev.example.org OUT_DIR="$SELF/bad-root" sh "$HERE/ca/make-root.sh"
 NAMESPACE=$NS SERVICE_HOST=$SVC OUT_DIR=$ROOT sh "$HERE/ca/make-root.sh" > "$SELF/root.out" 2>&1 \
@@ -72,6 +85,12 @@ cmp -s "$ROOT/root.crt" "$ROOT/ca-bundle.pem" && ok "ca-bundle.pem is the root o
 # 2. Leaf issuance via the script (signed by the issuing CA).
 LEAF=$SELF/leaf-svc
 refused_script "issue-leaf refuses a host outside the constraints" CA_DIR=$ROOT HOST=$OUTSIDE OUT_DIR=$SELF/leaf-out sh "$HERE/ca/issue-leaf.sh"
+mkdir -p "$SELF/badenv" && cp "$ROOT/root.crt" "$ROOT/issuing.crt" "$ROOT/issuing.key" "$SELF/badenv/"
+printf 'NAMESPACE=%s\nSERVICE_HOST=%s\nEVIL=1\n' "$NS" "$SVC" > "$SELF/badenv/constraints.env"
+refused_script "issue-leaf refuses constraints.env with an unexpected key" CA_DIR=$SELF/badenv HOST=$SVC OUT_DIR=$SELF/leaf-badenv1 sh "$HERE/ca/issue-leaf.sh"
+printf 'NAMESPACE=%s\nSERVICE_HOST=%s\n' "$NS" '$(touch /tmp/selfca-injected)' > "$SELF/badenv/constraints.env"
+refused_script "issue-leaf refuses constraints.env with a command-substitution value" CA_DIR=$SELF/badenv HOST=$SVC OUT_DIR=$SELF/leaf-badenv2 sh "$HERE/ca/issue-leaf.sh"
+[ ! -e /tmp/selfca-injected ] && ok "constraints.env was not executed" || bad "constraints.env executed" ""
 refused_script "issue-leaf refuses OUT_DIR inside the worktree" CA_DIR=$ROOT HOST=$SVC OUT_DIR="$HERE/ca/should-not-exist" sh "$HERE/ca/issue-leaf.sh"
 CA_DIR=$ROOT HOST=$SVC OUT_DIR=$LEAF sh "$HERE/ca/issue-leaf.sh" > "$SELF/leaf.out" 2>&1 \
   && ok "issue-leaf issues the service leaf" || bad "issue-leaf" "$(tail -2 "$SELF/leaf.out")"

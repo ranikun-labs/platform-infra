@@ -5,8 +5,11 @@
 # Rotation = rebuild the image with the new bundle. Values are never printed.
 # Output: /run/carelog-trust/cacerts (readable by the Core app, which mounts the volume read-only).
 # Rejected (container exits non-zero before writing the output): empty bundle, non-PEM content,
-# any private key, a certificate that is not a CA (basicConstraints CA:TRUE), an expired CA, or a
+# any private key, a certificate that is not a CA (basicConstraints CA:TRUE), an expired CA, a certificate that is not
+# self-issued (owner must equal issuer, so an issuing CA or intermediate is refused), a CA without pathlen 1, or a
 # store that does not grow by exactly the number of imported certificates.
+# The self-signature itself is checked with openssl by build/build-images.sh on the build host (openssl is not
+# assumed to exist in the Core base image).
 set -eu
 : "${JAVA_HOME:?JAVA_HOME required}"
 CA_BUNDLE="${CARELOG_CA_BUNDLE:-/usr/local/share/carelog/carelog-dev-ca-bundle.pem}"
@@ -60,6 +63,11 @@ for pem in "$SPLIT_DIR"/ca-*.pem; do
   until_text=$(echo "$info" | sed -n 's/.*until: //p' | head -n 1)
   until_epoch=$(date -d "$until_text" +%s 2>/dev/null) || fail "bundle certificate $i has an unreadable validity date"
   [ "$until_epoch" -gt "$now" ] || fail "bundle certificate $i is expired"
+  # Only a self-issued root from make-root (pathlen:1). An issuing CA or any intermediate in the bundle is refused.
+  owner=$(echo "$info" | sed -n 's/^Owner: //p' | head -n 1)
+  issuer=$(echo "$info" | sed -n 's/^Issuer: //p' | head -n 1)
+  [ -n "$owner" ] && [ "$owner" = "$issuer" ] || fail "bundle certificate $i is not self-issued (issuing CA or intermediate refused)"
+  echo "$info" | grep -Eq 'PathLen: *1$' || fail "bundle certificate $i must be a CA with pathlen 1 (root from make-root)"
   keytool -importcert -noprompt -alias "$ALIAS_PREFIX-$i" -file "$pem" \
     -keystore "$STORE" -storepass "$STORE_PASS" >/dev/null 2>&1 || fail "bundle certificate $i was not imported"
   keytool -list -alias "$ALIAS_PREFIX-$i" -keystore "$STORE" -storepass "$STORE_PASS" >/dev/null

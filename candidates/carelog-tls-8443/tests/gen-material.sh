@@ -1,6 +1,6 @@
 #!/bin/sh
 # Generates throwaway test PKI in $1 (must be empty or absent). Never used outside tests.
-#   ca.crt / ca.key            self-signed test CA (CA:TRUE)
+#   ca.crt / ca.key            self-signed test root (CA:TRUE, pathlen:1, as make-root produces)
 #   good.crt / good.key        leaf, SAN DNS:$SAN, CA:FALSE, valid now
 #   wrongsan.crt / .key        leaf, SAN DNS:other.test.internal (name mismatch case)
 #   expired.crt / .key         leaf, SAN DNS:$SAN, notAfter in 2021 (expiry case)
@@ -36,7 +36,7 @@ EOF
 
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
   -keyout ca.key -out ca.crt -days 3650 -subj "/CN=carelog-dev-test-ca" \
-  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:1" -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
 
 leaf() {  # name san startdate enddate
   name=$1; san=$2; start=$3; end=$4
@@ -106,3 +106,14 @@ cat good2.crt inter-nonc.crt > chain-nonc.crt
 cat good2.crt alien-inter.crt > chain-alien.crt
 cat evil2.crt inter.crt > chain-outside.crt
 cat good2.crt inter.crt inter.key > chain-with-ca-key.crt
+
+# Root-signed leaf (no issuing CA): the entrypoint must refuse it when an issuing CA is sent alongside.
+sign rootleaf ca.crt ca.key "$SAN" "DNS:$SAN" \
+  "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth"
+cat rootleaf.crt inter.crt > chain-rootleaf.crt
+# Self-signed root without pathlen (trust-init must refuse: pathlen 1 required).
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout root-nopath.key -out root-nopath.crt \
+  -days 3650 -subj "/CN=carelog-root-no-pathlen" -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
+cp root-nopath.crt root-nopath-bundle.pem
+cp inter.crt inter-bundle.pem

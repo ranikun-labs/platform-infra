@@ -72,6 +72,11 @@ TLS_EXPECTED_DNS_SAN=$SAN TLS_BUNDLE_JSON=$(bundle "$PKI/chain-twotier.crt" "$PK
 TLS_EXPECTED_DNS_SAN=$SAN TLS_BUNDLE_JSON=$(bundle "$PKI/chain-twotier.crt" "$PKI/good2.key") TLS_ROOT_CA_PEM="$(cat "$PKI/ca.key")" run_case "TLS_ROOT_CA_PEM holding a key refused" "private key"
 TLS_EXPECTED_DNS_SAN=$SAN TLS_BUNDLE_JSON=$(bundle "$PKI/chain-twotier.crt" "$PKI/good2.key") TLS_ROOT_CA_PEM= run_case "missing root refused" "TLS_ROOT_CA_PEM required"
 
+# Leaf must be issued by the issuing CA that was sent (partial-chain check), not merely verify to the root.
+TLS_EXPECTED_DNS_SAN=$SAN TLS_BUNDLE_JSON=$(bundle "$PKI/chain-rootleaf.crt" "$PKI/rootleaf.key") run_case "root-signed leaf with a valid issuing CA refused" "not signed by the issuing CA"
+cat "$PKI/rootleaf.crt" "$PKI/alien-inter.crt" > "$WORK/chain-rootleaf-alien.crt"
+TLS_EXPECTED_DNS_SAN=$SAN TLS_BUNDLE_JSON=$(bundle "$WORK/chain-rootleaf-alien.crt" "$PKI/rootleaf.key") run_case "root-signed leaf with an arbitrary issuing CA refused" "not signed by the issuing CA"
+
 # Input refusals (unchanged from round 1).
 TLS_EXPECTED_DNS_SAN='*.test.internal' TLS_BUNDLE_JSON=$(bundle "$PKI/chain-twotier.crt" "$PKI/good2.key") run_case "wildcard expected name refused" "not a plain DNS name"
 TLS_EXPECTED_DNS_SAN= TLS_BUNDLE_JSON=$(bundle "$PKI/chain-twotier.crt" "$PKI/good2.key") run_case "empty expected name refused" "TLS_EXPECTED_DNS_SAN"

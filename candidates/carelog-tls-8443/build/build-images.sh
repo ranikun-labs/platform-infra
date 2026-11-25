@@ -19,6 +19,23 @@ printf '%s' "$CORE_IMAGE" | grep -Eq '^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$' \
 printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{7,40}$' || fail "SOURCE_SHA must be a git commit hash"
 [ -s "$CA_BUNDLE" ] || fail "CA_BUNDLE is empty or missing"
 grep -q 'PRIVATE KEY' "$CA_BUNDLE" && fail "CA_BUNDLE contains private key material; refusing"
+# Every bundle certificate must be a self-signed root from make-root (pathlen:1) whose signature verifies with itself.
+command -v openssl >/dev/null 2>&1 || fail "openssl is required on the build host to check CA_BUNDLE"
+BCHK=$(mktemp -d)
+trap 'rm -rf "$BCHK"' EXIT
+awk -v d="$BCHK" '/BEGIN CERTIFICATE/ { n++; f = sprintf("%s/ca-%02d.pem", d, n) } f { print > f } /END CERTIFICATE/ { close(f); f = "" }' "$CA_BUNDLE"
+nb=0
+for c in "$BCHK"/ca-*.pem; do
+  nb=$((nb + 1))
+  s_sub=$(openssl x509 -in "$c" -noout -subject -nameopt RFC2253) || fail "CA_BUNDLE certificate $nb does not parse"
+  s_iss=$(openssl x509 -in "$c" -noout -issuer -nameopt RFC2253)
+  [ "$(printf '%s' "$s_sub" | sed 's/^subject=//')" = "$(printf '%s' "$s_iss" | sed 's/^issuer=//')" ] \
+    || fail "CA_BUNDLE certificate $nb is not self-issued (only roots from make-root may be bundled)"
+  openssl verify -CAfile "$c" "$c" >/dev/null 2>&1 || fail "CA_BUNDLE certificate $nb does not verify with itself"
+  openssl x509 -in "$c" -noout -ext basicConstraints | grep -q 'CA:TRUE, pathlen:1' \
+    || fail "CA_BUNDLE certificate $nb must be CA:TRUE, pathlen:1"
+done
+[ "$nb" -ge 1 ] || fail "CA_BUNDLE holds no certificate"
 
 TAG="$SOURCE_SHA"
 echo "== front proxy image"

@@ -57,6 +57,8 @@ neg() {  # name bundle-file fragment
 neg empty-bundle "$PKI/empty.pem" "empty"
 neg leaf-not-ca "$PKI/leaf-as-ca-bundle.pem" "not a CA"
 neg expired-ca "$PKI/expired-ca-bundle.pem" "expired"
+neg issuing-ca-in-bundle "$PKI/inter-bundle.pem" "not self-issued"
+neg root-without-pathlen "$PKI/root-nopath-bundle.pem" "pathlen 1"
 cat "$PKI/ca.crt" "$PKI/ca.key" > "$PKI/ca-with-key.pem"
 neg bundle-contains-private-key "$PKI/ca-with-key.pem" "private key"
 printf 'not a certificate\n' > "$PKI/garbage.pem"
@@ -90,5 +92,17 @@ if [ "${DOCKER:-0}" = 1 ]; then
     && ok "entrypoint is trust-init" || bad "entrypoint" ""
 fi
 
+# build-images.sh refuses the same bundle inputs on the host, before any docker call (CORE_IMAGE digest is well-formed).
+BUILD="$HERE/build/build-images.sh"
+bld() {  # name bundle fragment
+  out=$(CORE_IMAGE=registry.invalid/core@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+    CA_BUNDLE="$2" SOURCE_SHA=0123456789abcdef0123456789abcdef01234567 sh "$BUILD" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q -- "$3"; then ok "build-images refuses: $1 ($3)"
+  else bad "build-images refuses: $1" "rc=$rc out=$(printf '%s' "$out" | tail -1)"; fi
+}
+bld issuing-ca-in-bundle "$PKI/inter-bundle.pem" "not self-issued"
+bld root-without-pathlen "$PKI/root-nopath-bundle.pem" "pathlen:1"
+
 echo "SUMMARY trust-init pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]
+

@@ -136,6 +136,10 @@ rm -f "$TLS_DIR"/rootsplit-*.pem
 if [ "$N" -eq 2 ]; then
   openssl verify -CAfile "$ROOT_FILE" -untrusted "$INTER" -verify_hostname "$EXPECTED_SAN" "$LEAF" >/dev/null 2>&1 \
     || fail "certificate chain does not verify to TLS_ROOT_CA_PEM for the expected name (name constraints included)"
+  # The leaf itself must be issued by the issuing CA that was sent: a leaf signed directly by the root would pass the
+  # full-chain check above (the issuing CA is then unused), so it is refused here.
+  openssl verify -partial_chain -CAfile "$INTER" "$LEAF" >/dev/null 2>&1 \
+    || fail "leaf is not signed by the issuing CA in tls_certificate"
 else
   openssl verify -CAfile "$ROOT_FILE" -verify_hostname "$EXPECTED_SAN" "$LEAF" >/dev/null 2>&1 \
     || fail "certificate does not verify to TLS_ROOT_CA_PEM for the expected name"
