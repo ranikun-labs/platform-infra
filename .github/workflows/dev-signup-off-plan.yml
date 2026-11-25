@@ -15,6 +15,14 @@ name: DEV signup-off plan (read-only)
 # - Published output is the sanitized gate summary: masked addresses, actions, changed
 #   attribute NAMES, and for failures only the denied action, service prefix and a hint.
 # - Requires the dev-plan environment approval and DEV_SIGNUP_OFF_PRESERVE_JSON.
+# - Concurrency: group `dev-signup-off-plan` with cancel-in-progress: false. One run executes and
+#   at most one run waits. A newer run queued while another is waiting REPLACES (cancels) the
+#   waiting run, so a queued run can disappear without a result. Check the run that actually
+#   completed; re-dispatch if the one you wanted was replaced.
+# - Egress: no runtime egress filter yet. step-security/harden-runner (block mode, allowlist of
+#   AWS STS/S3/regional endpoints, registry.terraform.io, releases.hashicorp.com and GitHub
+#   Actions endpoints) is NOT added because its full commit SHA could not be verified here and
+#   the allowlist cannot be exercised without a live run. Tracked as a follow-up.
 
 on:
   workflow_dispatch:
@@ -167,8 +175,6 @@ jobs:
           umask 077
           fail() { printf '%s\n' "$1" > "$RUNNER_TEMP/skip-$ROOT.code"; echo "$2" >&2; exit 1; }
           expected_key="dev/${ROOT}/terraform.tfstate"
-          grep -Eq "key[[:space:]]*=[[:space:]]*\"${expected_key}\"" versions.tf \
-            || fail input-invalid "versions.tf backend key is not $expected_key"
           if ! env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT -u GITHUB_ENV terraform init -input=false -no-color -lockfile=readonly \
             -backend-config='bucket=ranikun-dev-tfstate-124495093425' \
             -backend-config='region=ap-northeast-2' \
@@ -354,8 +360,6 @@ jobs:
           umask 077
           fail() { printf '%s\n' "$1" > "$RUNNER_TEMP/skip-finance.code"; echo "$2" >&2; exit 1; }
           expected_key='dev/finance/terraform.tfstate'
-          grep -Eq "key[[:space:]]*=[[:space:]]*\"${expected_key}\"" versions.tf \
-            || fail input-invalid "versions.tf backend key is not $expected_key"
           if ! env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT -u GITHUB_ENV terraform init -input=false -no-color -lockfile=readonly \
             -backend-config='bucket=ranikun-dev-tfstate-124495093425' \
             -backend-config='region=ap-northeast-2' \

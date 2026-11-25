@@ -34,7 +34,8 @@ TASKDEF_RE = re.compile(r"\.aws_ecs_task_definition\.baseline$")
 SENSITIVE_RE = re.compile(r"environment|secret|policy|container_definitions|password|token|key", re.I)
 INDEX_RE = re.compile(r"\[[^\]]*\]")
 KINDS = ["create", "update", "replace", "delete", "forget", "moved", "no-op"]
-DENIED_ACTION_RE = re.compile(r"not authorized to perform:\s*([A-Za-z0-9-]+:[A-Za-z0-9*_.-]+)")
+DENIED_ACTION_RE = re.compile(r"not authorized to perform:\s*([a-z0-9-]{2,32}:[A-Za-z][A-Za-z0-9*]{0,63})")
+MAX_DENIED_ITEMS = 5
 DENIED_SERVICE_RE = re.compile(r"on resource:\s*\"?arn:[a-z-]+:([a-z0-9-]+):")
 
 # Fixed codes written by the workflow when a root cannot be planned.
@@ -124,13 +125,18 @@ def _hint(service, line):
 
 
 def access_denied_items(log_paths):
-    """Return sorted (action, service, hint) tuples. Nothing else from the log is kept."""
+    """Return sorted (action, service, hint) tuples, at most MAX_DENIED_ITEMS.
+
+    Only lines in Terraform/provider `Error:` context are read. Nothing else from the log is kept.
+    """
     items = set()
     for path in log_paths:
         if not os.path.isfile(path):
             continue
         with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
+                if "Error:" not in line:
+                    continue
                 if "AccessDenied" not in line and "not authorized to perform" not in line \
                         and "UnauthorizedOperation" not in line:
                     continue
@@ -138,7 +144,7 @@ def access_denied_items(log_paths):
                 service = DENIED_SERVICE_RE.search(line)
                 svc = service.group(1) if service else "unknown"
                 items.add((action.group(1) if action else "unparsed", svc, _hint(svc, line)))
-    return sorted(items)[:20]
+    return sorted(items)[:MAX_DENIED_ITEMS]
 
 
 def undeclared_in(log_paths):

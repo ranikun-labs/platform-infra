@@ -7,10 +7,18 @@ It reads candidate files as data only. Fail closed on every rule below.
 
 Rules:
 - forbidden files: symlinks, *.tf.json, *override*.tf, *.tfvars, *.tfvars.json, .terraform/ dirs
-- data sources: only aws_* and terraform_remote_state
+- file-family functions (file*, templatefile, pathexpand) are denied in every scanned file,
+  so candidate code cannot read local files such as /proc/self/environ into plan data
+- data sources: only aws_* types, except side-effect types (aws_lambda_invocation invokes a
+  Lambda, aws_kms_secrets decrypts candidate-supplied ciphertext, aws_ecr_authorization_token
+  mints a registry credential). terraform_remote_state is denied entirely.
 - resources: only aws_* and terraform_data (no provisioner, no null/external/http/local)
-- providers: only `aws`, sourced from hashicorp/aws in required_providers
-- module sources: only local ./ or ../ paths that stay inside the candidate checkout
+- providers: only `aws`. Every provider "aws" block body must be byte-identical to a
+  provider "aws" block in main's root, and must not set endpoint, proxy, CA, TLS, shared
+  file or assume-role arguments.
+- module sources: exactly one literal source per module, a ./ or ../ path that stays inside
+  the candidate checkout. Anything else (git::, registry, var/local refs, absolute) is denied.
+- block labels may be quoted or bare identifiers (HCL allows both); both forms are checked
 - backend: exactly one s3 backend, in versions.tf, body byte-identical to main's
 - .terraform.lock.hcl: byte-identical to main's for this root
 
@@ -23,20 +31,37 @@ import os
 import re
 import sys
 
-MODULE_RE = re.compile(r'\bmodule\s+"[^"]+"\s*')
-DATA_RE = re.compile(r'\bdata\s+"([^"]+)"\s+"[^"]+"\s*')
-RESOURCE_RE = re.compile(r'\bresource\s+"([^"]+)"\s+"[^"]+"\s*')
-PROVIDER_RE = re.compile(r'\bprovider\s+"([^"]+)"\s*')
-REQUIRED_RE = re.compile(r'\brequired_providers\s*')
-PROVISIONER_RE = re.compile(r'\bprovisioner\s+"[^"]+"\s*')
-BACKEND_RE = re.compile(r'\bbackend\s+"([^"]+)"\s*')
+# HCL block labels may be quoted or bare identifiers. Module/provider/provisioner/backend
+# take one label; data/resource take two (type, name). Every header must end with `{`:
+# HCL requires it, and it keeps prose such as "provider rejects any account" from parsing as a block.
+LABEL = r'"?([A-Za-z_][\w-]*)"?'
+NAME = r'"?[\w-]+"?'
+MODULE_RE = re.compile(rf'\bmodule\s+{LABEL}\s*\{{')
+DATA_RE = re.compile(rf'\bdata\s+{LABEL}\s+{NAME}\s*\{{')
+RESOURCE_RE = re.compile(rf'\bresource\s+{LABEL}\s+{NAME}\s*\{{')
+PROVIDER_RE = re.compile(rf'\bprovider\s+{LABEL}\s*\{{')
+PROVISIONER_RE = re.compile(rf'\bprovisioner\s+{LABEL}\s*\{{')
+BACKEND_RE = re.compile(rf'\bbackend\s+{LABEL}\s*\{{')
+REQUIRED_RE = re.compile(r'\brequired_providers\s*\{')
 CLOUD_RE = re.compile(r'\bcloud\s*\{')
-SOURCE_RE = re.compile(r'\bsource\s*=\s*"([^"]*)"')
+FILE_FN_RE = re.compile(r'\b(file\w*|templatefile|pathexpand)\s*\(')
+SOURCE_KEY_RE = re.compile(r'\bsource\s*=')
+SOURCE_LITERAL_RE = re.compile(r'\bsource\s*=\s*"([^"]*)"')
 PROVIDER_ENTRY_RE = re.compile(r'(\w+)\s*=\s*\{([^{}]*)\}')
+PROVIDER_DENIED_ARG_RE = re.compile(
+    r'\b(endpoints|http_proxy|custom_ca_bundle|insecure|shared_config_files|shared_credentials_files'
+    r'|assume_role|assume_role_with_web_identity|access_key|secret_key|token|profile)\b')
+
+# Side-effect data sources that stay denied even though they are aws_* types.
+DENIED_DATA = frozenset({"aws_lambda_invocation", "aws_kms_secrets", "aws_ecr_authorization_token"})
 
 
-def blocks(text, header_re):
-    """Yield (line_no, body) for each block whose header matches. Brace-counted, not a full HCL parse."""
+def line_of(text, pos):
+    return text.count("\n", 0, pos) + 1
+
+
+def iter_blocks(text, header_re):
+    """Yield (line_no, match, body) per block whose header matches. Brace-counted, not a full HCL parse."""
     for m in header_re.finditer(text):
         open_at = text.find("{", m.end() - 1)
         if open_at < 0:
@@ -52,13 +77,14 @@ def blocks(text, header_re):
                 if depth == 0:
                     end = j
                     break
-        yield text.count("\n", 0, m.start()) + 1, text[open_at + 1:end]
+        yield line_of(text, m.start()), m, text[open_at + 1:end]
 
 
 class Scan:
-    def __init__(self, candidate_root, trusted_root):
+    def __init__(self, candidate_root, trusted_root, trusted_aws_bodies):
         self.cand = os.path.realpath(candidate_root)
         self.trusted = os.path.realpath(trusted_root)
+        self.trusted_aws_bodies = trusted_aws_bodies
         self.violations = []
         self.visited = set()
         self.backends = []  # (relpath, line, type)
@@ -98,14 +124,25 @@ class Scan:
     def scan_file(self, path):
         with open(path, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
+
+        def flag_at(m, rule):
+            self.flag(path, line_of(text, m.start()), rule)
+
         for m in CLOUD_RE.finditer(text):
-            self.flag(path, text.count("\n", 0, m.start()) + 1, "cloud block not allowed")
-        for line, body in blocks(text, MODULE_RE):
-            m = SOURCE_RE.search(body)
-            if not m:
+            flag_at(m, "cloud block not allowed")
+        for m in FILE_FN_RE.finditer(text):
+            flag_at(m, f"file-family function {m.group(1)!r} not allowed")
+
+        for line, _m, body in iter_blocks(text, MODULE_RE):
+            keys = SOURCE_KEY_RE.findall(body)
+            lits = SOURCE_LITERAL_RE.findall(body)
+            if not keys:
                 self.flag(path, line, "module without a source not allowed")
                 continue
-            src = m.group(1)
+            if len(keys) != 1 or len(lits) != 1:
+                self.flag(path, line, "module source must be exactly one literal string")
+                continue
+            src = lits[0]
             if not src.startswith(("./", "../")):
                 self.flag(path, line, "non-local module source not allowed")
                 continue
@@ -114,38 +151,65 @@ class Scan:
                 self.flag(path, line, "local module source does not exist")
                 continue
             self.scan_dir(target)
+
         for m in DATA_RE.finditer(text):
             dtype = m.group(1)
-            if not (dtype.startswith("aws_") or dtype == "terraform_remote_state"):
-                self.flag(path, text.count("\n", 0, m.start()) + 1,
-                          f"data source type {dtype!r} not allowed")
+            if dtype == "terraform_remote_state":
+                flag_at(m, "data source type 'terraform_remote_state' not allowed (denied entirely)")
+            elif dtype in DENIED_DATA:
+                flag_at(m, f"data source type {dtype!r} not allowed (side effect: invokes or mints)")
+            elif not dtype.startswith("aws_"):
+                flag_at(m, f"data source type {dtype!r} not allowed")
+
         for m in RESOURCE_RE.finditer(text):
             rtype = m.group(1)
             if not (rtype.startswith("aws_") or rtype == "terraform_data"):
-                self.flag(path, text.count("\n", 0, m.start()) + 1,
-                          f"resource type {rtype!r} not allowed")
-        for m in PROVIDER_RE.finditer(text):
-            if m.group(1) != "aws":
-                self.flag(path, text.count("\n", 0, m.start()) + 1,
-                          f"provider {m.group(1)!r} not allowed")
+                flag_at(m, f"resource type {rtype!r} not allowed")
+
         for m in PROVISIONER_RE.finditer(text):
-            self.flag(path, text.count("\n", 0, m.start()) + 1, "provisioner not allowed")
-        for line, body in blocks(text, REQUIRED_RE):
+            flag_at(m, "provisioner not allowed")
+
+        for line, m, body in iter_blocks(text, PROVIDER_RE):
+            if m.group(1) != "aws":
+                self.flag(path, line, f"provider {m.group(1)!r} not allowed")
+                continue
+            if body not in self.trusted_aws_bodies:
+                self.flag(path, line, "provider 'aws' block differs from main (byte comparison)")
+            denied = PROVIDER_DENIED_ARG_RE.search(body)
+            if denied:
+                self.flag(path, line, f"provider 'aws' sets denied argument {denied.group(1)!r}")
+
+        for line, _m, body in iter_blocks(text, REQUIRED_RE):
             for name, inner in PROVIDER_ENTRY_RE.findall(body):
-                src = SOURCE_RE.search(inner)
+                src = SOURCE_LITERAL_RE.search(inner)
                 if name != "aws" or not src or src.group(1) != "hashicorp/aws":
                     self.flag(path, line, f"required provider {name!r} not allowed (only hashicorp/aws)")
+
         for m in BACKEND_RE.finditer(text):
-            self.backends.append((self.rel(path), text.count("\n", 0, m.start()) + 1, m.group(1)))
+            self.backends.append((self.rel(path), line_of(text, m.start()), m.group(1)))
+
+
+def aws_provider_bodies(root_dir):
+    """Bodies of every provider "aws" block in the trusted root (main). Candidate bodies must match one."""
+    bodies = set()
+    for name in sorted(os.listdir(root_dir)):
+        path = os.path.join(root_dir, name)
+        if name.endswith(".tf") and os.path.isfile(path):
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            for _line, m, body in iter_blocks(text, PROVIDER_RE):
+                if m.group(1) == "aws":
+                    bodies.add(body)
+    return bodies
 
 
 def read_backend_body(path):
-    """Return the body text of the single backend block in versions.tf, or None."""
+    """Return the body text of the single s3 backend block in versions.tf, or None."""
     if not os.path.isfile(path):
         return None
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
-    found = [body for _, body in blocks(text, re.compile(r'\bbackend\s+"s3"\s*'))]
+    found = [body for _line, _m, body in iter_blocks(text, re.compile(r'\bbackend\s+"?s3"?\s*\{'))]
     return found[0] if len(found) == 1 else None
 
 
@@ -168,7 +232,7 @@ def main(argv=None):
     else:
         # Module sources may point anywhere inside the candidate checkout, so the
         # containment check uses the checkout root, not the root directory.
-        sc = Scan(args.candidate_root, args.trusted_root)
+        sc = Scan(args.candidate_root, args.trusted_root, aws_provider_bodies(trusted_dir))
         sc.scan_dir(cand_dir)
         problems.extend(sc.violations)
 

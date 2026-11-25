@@ -174,6 +174,33 @@ class GateTests(unittest.TestCase):
         rc, out, text = run("/nonexistent/plan.json", "off", skip="made-up")
         self.assertEqual(rc, 3)
 
+    def test_skip_access_denied_capped_at_five_items(self):
+        d = tempfile.mkdtemp()
+        log = os.path.join(d, "plan.log")
+        with open(log, "w", encoding="utf-8") as fh:
+            for i in range(8):
+                fh.write(f"Error: not authorized to perform: svc{i}:Action{i}Thing on resource: x\n")
+        rc, out, text = run("/nonexistent/plan.json", "off", skip="plan-failed", logs=[log])
+        self.assertEqual(text.count("- AccessDenied:"), 5, text)
+
+    def test_skip_access_denied_ignores_non_error_lines(self):
+        d = tempfile.mkdtemp()
+        log = os.path.join(d, "plan.log")
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write("Note: not authorized to perform: iam:PassRole on resource: x\n")
+        rc, out, text = run("/nonexistent/plan.json", "off", skip="plan-failed", logs=[log])
+        self.assertNotIn("iam:PassRole", text)
+        self.assertNotIn("AccessDenied:", text)
+
+    def test_skip_access_denied_rejects_malformed_action(self):
+        d = tempfile.mkdtemp()
+        log = os.path.join(d, "plan.log")
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write("Error: not authorized to perform: ../../etc:passwd on resource: x\n")
+        rc, out, text = run("/nonexistent/plan.json", "off", skip="plan-failed", logs=[log])
+        self.assertIn("`unparsed`", text)
+        self.assertNotIn("../../etc", text)
+
 
 if __name__ == "__main__":
     unittest.main()

