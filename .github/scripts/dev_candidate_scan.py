@@ -21,6 +21,11 @@ Rules:
 - block labels may be quoted or bare identifiers (HCL allows both); both forms are checked
 - backend: exactly one s3 backend, in versions.tf, body byte-identical to main's
 - .terraform.lock.hcl: byte-identical to main's for this root
+- heredoc markers (`<<`, `<<-`) must be plain identifiers; comments inside provider "aws" and
+  the s3 backend block are rejected
+
+Detection runs on the raw text, so comments and strings can only add false positives. The
+comment-stripping tokenizer is used only to compare provider bodies with main's.
 
 Prints only relative paths, line numbers and rule names. Never prints file contents.
 Exit 0 pass, 2 violations, 3 usage/input error.
@@ -54,6 +59,10 @@ PROVIDER_DENIED_ARG_RE = re.compile(
 
 # Side-effect data sources that stay denied even though they are aws_* types.
 DENIED_DATA = frozenset({"aws_lambda_invocation", "aws_kms_secrets", "aws_ecr_authorization_token"})
+
+IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+HEREDOC_MARKER_RE = re.compile(r"-?[ \t]*([^ \t\r\n]*)")
+COMMENT_MARK_RE = re.compile(r"#|//|/\*")
 
 
 def line_of(text, pos):
@@ -207,16 +216,25 @@ class Scan:
                 self.scan_file(os.path.join(d, name))
 
     def scan_file(self, path):
+        # Every deny rule runs on the RAW text. Comments and strings are never removed before
+        # matching, so a tokenizer bug can at worst add a false positive, never hide code.
+        # Comment stripping is used only to compare provider and backend bodies with main.
         with open(path, encoding="utf-8", errors="replace") as fh:
-            raw = fh.read()
-        # Block comments are denied outright: Terraform accepts them between labels, braces and
-        # function names, where a tokenizer-level strip would have to model every such position.
-        for m in re.finditer(r"/\*", raw):
-            self.flag(path, line_of(raw, m.start()), "block comment /* */ not allowed")
-        text = strip_comments(raw)
+            text = fh.read()
 
         def flag_at(m, rule):
             self.flag(path, line_of(text, m.start()), rule)
+
+        # Block comments are denied outright: Terraform accepts them between labels, braces and
+        # function names.
+        for m in re.finditer(r"/\*", text):
+            flag_at(m, "block comment /* */ not allowed")
+        # Heredoc markers must be plain identifiers. Anything else (hyphen, unicode, empty) is
+        # rejected, so the stripper never has to model an unusual heredoc.
+        for m in re.finditer(r"<<", text):
+            marker = HEREDOC_MARKER_RE.match(text, m.end()).group(1)
+            if not IDENT_RE.fullmatch(marker):
+                flag_at(m, "heredoc marker must be a plain identifier")
 
         for m in CLOUD_RE.finditer(text):
             flag_at(m, "cloud block not allowed")
@@ -263,7 +281,9 @@ class Scan:
             if m.group(1) != "aws":
                 self.flag(path, line, f"provider {m.group(1)!r} not allowed")
                 continue
-            if body not in self.trusted_aws_bodies:
+            if COMMENT_MARK_RE.search(body):
+                self.flag(path, line, "comment not allowed inside provider 'aws' block")
+            if strip_comments(body) not in self.trusted_aws_bodies:
                 self.flag(path, line, "provider 'aws' block differs from main (byte comparison)")
             denied = PROVIDER_DENIED_ARG_RE.search(body)
             if denied:
@@ -287,20 +307,26 @@ def aws_provider_bodies(root_dir):
         if name.endswith(".tf") and os.path.isfile(path):
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
-            for _line, m, body in iter_blocks(strip_comments(text), PROVIDER_RE):
+            for _line, m, body in iter_blocks(text, PROVIDER_RE):
                 if m.group(1) == "aws":
-                    bodies.add(body)
+                    bodies.add(strip_comments(body))
     return bodies
 
 
 def read_backend_body(path):
-    """Return the body text of the single s3 backend block in versions.tf, or None."""
+    """Return the comment-stripped body of the single s3 backend block in versions.tf, or None.
+
+    None also when the raw block contains a comment marker, so a comment can never be the
+    reason two bodies compare equal.
+    """
     if not os.path.isfile(path):
         return None
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
-    found = [body for _line, _m, body in iter_blocks(strip_comments(text), re.compile(r'\bbackend\s+"?s3"?\s*\{'))]
-    return found[0] if len(found) == 1 else None
+    found = [body for _line, _m, body in iter_blocks(text, re.compile(r'\bbackend\s+"?s3"?\s*\{'))]
+    if len(found) != 1 or COMMENT_MARK_RE.search(found[0]):
+        return None
+    return found[0]
 
 
 def main(argv=None):
@@ -338,7 +364,7 @@ def main(argv=None):
         if body_t is None:
             problems.append("main has no single s3 backend block in versions.tf (reference missing)")
         elif body_c is None:
-            problems.append("candidate has no single s3 backend block in versions.tf")
+            problems.append("candidate has no single comment-free s3 backend block in versions.tf")
         elif body_c != body_t:
             problems.append("s3 backend block differs from main (byte comparison)")
         for relpath, line, btype in sc.backends:

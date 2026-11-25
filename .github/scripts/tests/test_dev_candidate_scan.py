@@ -300,12 +300,52 @@ class ScanTests(unittest.TestCase):
         self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
                          "file-family function 'file' not allowed")
 
-    def test_comment_text_hiding_nothing_passes(self):
-        # Comment bodies carry no code: a file() call and a block header inside # or // are ignored.
+    def test_denied_text_inside_comment_fails_closed(self):
+        # Rules run on raw text, so a denied call inside a comment is a false positive by design.
         hcl = ('locals {\n  x = 1 # file("/proc/self/environ")\n'
                '  y = 2 // data "terraform_remote_state" "q" {\n}\n')
+        self.assertFailsAll(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                            ["file-family function 'file' not allowed",
+                             "data source type 'terraform_remote_state' not allowed"])
+
+    def test_reviewer_heredoc_hyphen_marker_bypass_rejected(self):
+        # Reviewer's round-4 HCL: a hyphenated heredoc marker used to flip the stripper state.
+        hcl = ('locals {\n  a = <<EO-T\n  x = "#"\n  b = file("/proc/self/environ")\nEO-T\n}\n')
+        self.assertFailsAll(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                            ["heredoc marker must be a plain identifier",
+                             "file-family function 'file' not allowed"])
+
+    def test_dash_heredoc_hyphen_marker_rejected(self):
+        hcl = 'locals {\n  a = <<-EO-T\n  x = 1\nEO-T\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "heredoc marker must be a plain identifier")
+
+    def test_unicode_heredoc_marker_rejected(self):
+        hcl = 'locals {\n  a = <<EOTé\n  x = 1\nEOTé\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "heredoc marker must be a plain identifier")
+
+    def test_empty_heredoc_marker_rejected(self):
+        hcl = 'locals {\n  a = <<\n  x = 1\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "heredoc marker must be a plain identifier")
+
+    def test_plain_heredoc_still_allowed(self):
+        hcl = 'locals {\n  a = <<EOT\n  hello # not a comment\nEOT\n}\n'
         rc, text = scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl))
         self.assertEqual(rc, 0, text)
+
+    def test_comment_inside_provider_aws_block_rejected(self):
+        bad = VERSIONS.replace('provider "aws" {\n  region = "ap-northeast-2"\n}\n',
+                               'provider "aws" {\n  region = "ap-northeast-2" # note\n}\n')
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/versions.tf", bad)),
+                         "comment not allowed inside provider 'aws' block")
+
+    def test_comment_inside_backend_block_rejected(self):
+        bad = VERSIONS.replace('    region = "ap-northeast-2"\n  }\n}',
+                               '    region = "ap-northeast-2" # note\n  }\n}')
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/versions.tf", bad)),
+                         "no single comment-free s3 backend block")
 
     def test_hash_inside_string_does_not_hide_interpolated_call(self):
         hcl = 'locals {\n  x = "# ${file("/proc/self/environ")}"\n}\n'
