@@ -1,4 +1,4 @@
-import os, re, unittest
+import copy, os, re, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKFLOWS = os.path.join(HERE, "..", "..", "workflows")
@@ -138,3 +138,133 @@ class PlanWorkflowTests(unittest.TestCase):
         validate = self.doc["jobs"]["validate"]
         script = next(s["run"] for s in validate["steps"] if "allowed=(" in s.get("run", ""))
         self.assertIn("(( ${#allowed[@]} > 0 ))", script)
+
+
+# --- egress precondition (MANDATORY before the first allowlisted SHA) ---
+
+HARDEN_PREFIX = "step-security/harden-runner@"
+GENERIC_S3_RE = re.compile(r"^s3[.-]")
+FAKE_SHA = "a" * 40
+BUCKET_HOST = "tfstate-bucket.s3.ap-northeast-2.amazonaws.com:443"
+
+
+def allowlist_shas(doc):
+    script = next(s["run"] for s in doc["jobs"]["validate"]["steps"] if "allowed=(" in s.get("run", ""))
+    body = re.search(r"allowed=\((.*?)\)", script, re.S).group(1)
+    return re.findall(r"\b[0-9a-f]{40}\b", body)
+
+
+def egress_violations(doc):
+    """Empty allowlist: nothing to enforce. Non-empty: every plan job must start with a pinned
+    harden-runner step in block mode whose allowlist names only the bucket-specific S3 host."""
+    if not allowlist_shas(doc):
+        return []
+    problems = []
+    for name in PLAN_JOBS:
+        steps = doc["jobs"][name]["steps"]
+        hardens = [s for s in steps if str(s.get("uses", "")).startswith(HARDEN_PREFIX)]
+        if not hardens:
+            problems.append(f"{name}: no harden-runner step (egress precondition)")
+            continue
+        harden = hardens[0]
+        if steps[0] is not harden:
+            problems.append(f"{name}: harden-runner must be the first step")
+        if not re.fullmatch(r"[0-9a-f]{40}", harden["uses"].split("@", 1)[1]):
+            problems.append(f"{name}: harden-runner is not pinned to a full SHA")
+        cfg = harden.get("with") or {}
+        if str(cfg.get("egress-policy")) != "block":
+            problems.append(f"{name}: harden-runner egress-policy must be block")
+        hosts = [e.split(":", 1)[0] for e in str(cfg.get("allowed-endpoints", "")).split()]
+        if not hosts:
+            problems.append(f"{name}: harden-runner allowed-endpoints missing")
+        if any("*" in h for h in hosts):
+            problems.append(f"{name}: wildcard egress host not allowed")
+        if any(GENERIC_S3_RE.match(h) for h in hosts):
+            problems.append(f"{name}: generic regional S3 host not allowed; use the bucket-specific host")
+        if not any(h.endswith(".s3.ap-northeast-2.amazonaws.com") and not GENERIC_S3_RE.match(h) for h in hosts):
+            problems.append(f"{name}: no bucket-specific S3 host in egress allowlist")
+    return problems
+
+
+def with_allowlist(doc, sha=FAKE_SHA):
+    d = copy.deepcopy(doc)
+    step = next(s for s in d["jobs"]["validate"]["steps"] if "allowed=(" in s.get("run", ""))
+    step["run"] = re.sub(r"allowed=\((.*?)\)", lambda m: f"allowed=(\n  {sha}\n)", step["run"], count=1, flags=re.S)
+    return d
+
+
+def harden_step(uses_ref=FAKE_SHA, **overrides):
+    cfg = {"egress-policy": "block", "allowed-endpoints": " ".join([
+        "sts.ap-northeast-2.amazonaws.com:443", "registry.terraform.io:443",
+        "releases.hashicorp.com:443", BUCKET_HOST])}
+    cfg.update(overrides)
+    return {"name": "Harden runner egress", "uses": f"{HARDEN_PREFIX}{uses_ref}", "with": cfg}
+
+
+class EgressPreconditionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = load("dev-signup-off-plan.yml")
+
+    def test_empty_allowlist_has_no_egress_requirement(self):
+        self.assertEqual(allowlist_shas(self.doc), [])
+        self.assertEqual(egress_violations(self.doc), [])
+
+    def test_nonempty_allowlist_without_harden_runner_fails(self):
+        d = with_allowlist(self.doc)
+        self.assertEqual(allowlist_shas(d), [FAKE_SHA])
+        problems = egress_violations(d)
+        for name in PLAN_JOBS:
+            self.assertIn(f"{name}: no harden-runner step (egress precondition)", problems)
+
+    def test_nonempty_allowlist_with_first_block_harden_passes(self):
+        d = with_allowlist(self.doc)
+        for name in PLAN_JOBS:
+            d["jobs"][name]["steps"].insert(0, harden_step())
+        self.assertEqual(egress_violations(d), [])
+
+    def test_harden_runner_after_checkout_fails(self):
+        d = with_allowlist(self.doc)
+        for name in PLAN_JOBS:
+            d["jobs"][name]["steps"].insert(1, harden_step())
+        problems = egress_violations(d)
+        for name in PLAN_JOBS:
+            self.assertIn(f"{name}: harden-runner must be the first step", problems)
+
+    def test_audit_mode_fails(self):
+        d = with_allowlist(self.doc)
+        for name in PLAN_JOBS:
+            d["jobs"][name]["steps"].insert(0, harden_step(**{"egress-policy": "audit"}))
+        self.assertTrue(all("egress-policy must be block" in p for p in egress_violations(d)))
+        self.assertEqual(len(egress_violations(d)), len(PLAN_JOBS))
+
+    def test_generic_regional_s3_host_fails(self):
+        d = with_allowlist(self.doc)
+        for name in PLAN_JOBS:
+            d["jobs"][name]["steps"].insert(0, harden_step(**{
+                "allowed-endpoints": BUCKET_HOST + " s3.ap-northeast-2.amazonaws.com:443"}))
+        self.assertTrue(any("generic regional S3 host" in p for p in egress_violations(d)))
+
+    def test_missing_bucket_specific_host_fails(self):
+        d = with_allowlist(self.doc)
+        for name in PLAN_JOBS:
+            d["jobs"][name]["steps"].insert(0, harden_step(**{
+                "allowed-endpoints": "sts.ap-northeast-2.amazonaws.com:443 registry.terraform.io:443"}))
+        self.assertTrue(any("no bucket-specific S3 host" in p for p in egress_violations(d)))
+
+    def test_wildcard_host_fails(self):
+        d = with_allowlist(self.doc)
+        for name in PLAN_JOBS:
+            d["jobs"][name]["steps"].insert(0, harden_step(**{"allowed-endpoints": "*.amazonaws.com:443"}))
+        self.assertTrue(any("wildcard" in p for p in egress_violations(d)))
+
+    def test_unpinned_harden_runner_fails(self):
+        d = with_allowlist(self.doc)
+        for name in PLAN_JOBS:
+            d["jobs"][name]["steps"].insert(0, harden_step(uses_ref="v2"))
+        self.assertTrue(any("not pinned to a full SHA" in p for p in egress_violations(d)))
+
+    def test_real_workflow_precondition_state_is_enforced(self):
+        # The committed workflow must satisfy the precondition in whatever state it is in. Today the
+        # allowlist is empty, so this is a no-op; the first SHA added makes it enforce the egress step.
+        self.assertEqual(egress_violations(self.doc), [])

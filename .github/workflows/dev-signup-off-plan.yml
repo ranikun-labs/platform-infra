@@ -21,13 +21,19 @@ name: DEV signup-off plan (read-only)
 #   completed; re-dispatch if the one you wanted was replaced.
 # - MANDATORY PRECONDITION before the first SHA is added to the allowlist below. Candidate code
 #   runs with DEV-scoped plan credentials, so these controls are the real security boundary:
-#   1. Egress block-mode filter on every job that runs candidate code, allowing only AWS
-#      STS/S3/regional endpoints, registry.terraform.io, releases.hashicorp.com and the GitHub
-#      Actions endpoints. Not yet added: step-security/harden-runner needs a full commit SHA that
-#      could not be verified here, and its allowlist needs a live run to validate.
+#   1. Egress block-mode filter (step-security/harden-runner, egress-policy: block) as the FIRST
+#      step of every job that runs candidate code. Allowlist: the STS regional endpoint,
+#      registry.terraform.io, releases.hashicorp.com, the GitHub Actions endpoints, and the
+#      tfstate bucket's own host only: `<tfstate-bucket>.s3.ap-northeast-2.amazonaws.com`.
+#      Never the generic regional S3 host. Not yet added: harden-runner needs a full commit SHA
+#      that could not be verified here, and its allowlist needs a live run to validate.
+#      Enforced by test_dev_plan_workflow.py (EgressPreconditionTests).
 #   2. Plan role (ranikun-dev-shared-plan) IAM Resource scoped to the owning account
-#      (124495093425) with an aws:ResourceAccount condition, plus an S3 endpoint policy limiting
-#      access to that account.
+#      (124495093425) with an aws:ResourceAccount condition. This condition stays mandatory,
+#      because regional API endpoints accept foreign ARNs. S3 endpoint policies do NOT apply
+#      on GitHub-hosted runners (public internet), so they are not a substitute for item 1.
+#      Alternative for stronger isolation: a self-hosted runner inside the VPC with an S3
+#      endpoint policy.
 #   Scanner note: dev_candidate_scan.py is a secondary mistake-catcher, not a security boundary.
 #   It approximates HCL with regular expressions and cannot be proven complete. Do not rely on
 #   it to contain a malicious candidate.
@@ -54,8 +60,10 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'candidate_sha must be a full 40-character lowercase SHA' >&2; exit 1; }
-          # MANDATORY: do not add the first SHA until the egress filter and IAM scoping described in the
-          # header's MANDATORY PRECONDITION are in place. Adding a SHA gives that code DEV credentials.
+          # MANDATORY: do not add the first SHA until both items of the header's MANDATORY PRECONDITION
+          # are in place: a harden-runner egress-policy: block first step with the bucket-specific S3
+          # host only, and the plan role's aws:ResourceAccount-scoped IAM. Adding a SHA gives that
+          # code DEV credentials. test_dev_plan_workflow.py fails the PR if the first part is missing.
           # Reviewed SHAs only; review of the SHA is a control, not the boundary.
           # Empty means fail closed until an owner adds the reviewed full SHA here.
           allowed=(
