@@ -129,12 +129,21 @@ gateway_jar="$(find_boot_jar "$platform_source/gateway-app/build/libs")"
 finance_jar="$(find_boot_jar "$finance_source/build/libs")"
 
 # Process-aware readiness: fails fast when the process exits instead of waiting for the full window.
+# Optional budget (seconds, 0 = none) and log file. With a log, repeated Redis failures fail the wait early.
 wait_ready() {
-  local pid="$1" url="$2" label="$3"
+  local pid="$1" url="$2" label="$3" budget="${4:-0}" log="${5:-}" started=$SECONDS
   for _ in $(seq 1 150); do
     if curl --fail --silent --max-time 5 --output /dev/null "$url"; then return 0; fi
     if ! kill -0 "$pid" 2>/dev/null; then
       printf '%s process exited before readiness.\n' "$label" >&2
+      return 1
+    fi
+    if [[ -n "$log" ]] && redis_repeat_failure "$log"; then
+      printf '%s early-fail: repeated Redis timeout/connection errors in probe log.\n' "$label" >&2
+      return 1
+    fi
+    if (( budget > 0 && SECONDS - started >= budget )); then
+      printf '%s readiness budget (%ss) exhausted.\n' "$label" "$budget" >&2
       return 1
     fi
     sleep 2
@@ -149,6 +158,7 @@ gateway_pid=""
 finance_pid=""
 final_level=unset
 probe_pass_level=-1
+probe_budget_exhausted=0
 section1_written=0
 probe_rows=()
 flyway_line="(not run)"
@@ -236,13 +246,28 @@ assert_flyway_v9() {
     return 1
   fi
 }
-# extract_cause: known root-cause patterns on "Caused by:" lines (the last, i.e. deepest, match wins); if none,
-# the first ERROR line. Output is redacted, CR-stripped and cut to 240 chars.
-known_cause_pattern='PSQLException|SSL|RedisConnectionException|RedisCommandTimeoutException|Config data resource|does not exist|Connection refused'
+# extract_cause: with a Spring "APPLICATION FAILED TO START" banner, the first non-empty line after "Description:"
+# wins (it names the configtree/startup failure directly). Otherwise the last (deepest) "Caused by:" line matching
+# known root-cause patterns; if none, the first ERROR line. Output is redacted, CR-stripped and cut to 240 chars.
+known_cause_pattern='PSQLException|does not support SSL|SSLHandshake|RedisConnectionException|RedisCommandTimeoutException|Config data resource .* does not exist|Connection refused'
+redis_failure_pattern='RedisCommandTimeoutException|RedisConnectionException'
+# Repeated Redis failures = 3+ non-stack-frame lines naming them (one exception can yield 2 header lines, so this
+# is a conservative threshold, not an exact attempt count).
+redis_repeat_failure() {
+  local log="$1" n
+  [[ -f "$log" ]] || return 1
+  n="$(grep -E "$redis_failure_pattern" "$log" 2>/dev/null | grep -vcE '^[[:space:]]+at ' || true)"
+  (( ${n:-0} >= 3 ))
+}
 extract_cause() {
   local log="$1" cause=""
   if [[ -f "$log" ]]; then
-    cause="$(grep -E 'Caused by: ' "$log" | grep -E "$known_cause_pattern" | tail -n 1 || true)"
+    if grep -q 'APPLICATION FAILED TO START' "$log"; then
+      cause="$(awk '/^Description:/{d=1; next} d && NF {sub(/^[[:space:]]+/, ""); print; exit}' "$log" || true)"
+    fi
+    if [[ -z "$cause" ]]; then
+      cause="$(grep -E 'Caused by: ' "$log" | grep -E "$known_cause_pattern" | tail -n 1 || true)"
+    fi
     if [[ -z "$cause" ]]; then
       cause="$(grep -E ' ERROR ' "$log" | head -n 1 || true)"
     fi
@@ -282,10 +307,13 @@ write_probe_section() {
     note 'DEV 설정 그대로(기준선): **PASS**. 보정 없이 readiness UP (prod profile 확인).'
   elif (( probe_pass_level > 0 )); then
     note "DEV 설정 그대로(기준선): **FAIL** — ${probe_pass_level}단계 누적 보정 후 기동. DEV 정합성 FINDING이며 job 실패 사유가 아님. 최종 판정은 아래 E2E 섹션."
+  elif (( probe_budget_exhausted )); then
+    note 'DEV 설정 그대로(기준선): **미판정**. 전체 probe 예산(6분) 소진으로 일부 단계가 실행되지 않음. 실행된 단계의 FAIL만 DEV 정합성 FINDING이며 job 실패 사유가 아님.'
   else
     note 'DEV 설정 그대로(기준선): **FAIL**. 보정 (a)(b)(c)를 누적 적용해도 DEV 설정 기동이 실패함. DEV 정합성 FINDING이며 job 실패 사유가 아님. 최종 판정은 아래 E2E 섹션.'
   fi
   if (( ${#probe_rows[@]} > 0 )); then
+    note "probe 예산: 단계당 ${probe_level_budget}초 readiness, probe 단계 전체 ${probe_phase_budget}초. 3회 이상 반복된 Redis 타임아웃/연결 오류는 즉시 FAIL 처리함."
     note '결론은 순서 의존적이다: 앞 단계의 실패가 뒤 단계의 원인을 가릴 수 있으므로, 표의 원인은 독립된 원인 목록이 아니다.'
     note '(a) /run/secrets는 DEV에도 적용될 수 있음 (application-prod.yml:3 configtree에 `optional:` 없음; DEV ECS task는 정적 근거상 파일을 제공하지 않음). CI 전용 차이인지 DEV 결함인지 판단 불가, DEV Task 조회 필요.'
     if (( run_secrets_preexisted )); then
@@ -297,8 +325,8 @@ write_probe_section() {
   note "선행 Flyway 부팅: ${flyway_line}. 보정 (a)(b)(c)를 모두 적용한 상태에서 수행하고 끝나면 보정을 초기화한 뒤 probe를 시작함. 빈 DB의 스키마 검증이 probe 원인에 섞이지 않도록 하기 위함."
   note 'probe 로그 사본(마스킹)은 artifact `dev-integration-dual-product-e2e-logs`로 업로드 (보존 3일).'
   emit ''
-  emit '| 단계 | 이번 단계에서 추가 적용한 보정 | probe 결과 | 원인 (probe 로그, 마스킹) |'
-  emit '|---|---|---|---|'
+  emit '| 단계 | 이번 단계에서 추가 적용한 보정 | probe 결과 | 원인 (probe 로그, 마스킹) | 소요 |'
+  emit '|---|---|---|---|---|'
   local row
   for row in "${probe_rows[@]}"; do emit "$row"; done
 }
@@ -395,26 +423,43 @@ probe_labels=(
   '(b) DB sslmode=disable (DEV: verify-full + /run/rds-ca.pem; CI Postgres는 평문)'
   '(c) VALKEY_TLS_ENABLED=false (DEV 기본 true; CI Valkey는 평문)'
 )
+# Probe budgets: each level gets its own readiness window; the whole phase is capped so a slow DEV-parity run cannot
+# stall the job. A level cut by the phase cap is reported as 미실행, not as a finding.
+probe_level_budget=90
+probe_phase_budget=360
+probe_phase_start=$SECONDS
+probe_budget_exhausted=0
 for level in 0 1 2 3; do
+  remaining=$(( probe_phase_budget - (SECONDS - probe_phase_start) ))
+  if (( remaining <= 0 )); then
+    probe_budget_exhausted=1
+    probe_rows+=("| $level | ${probe_labels[$level]} | 미실행 | 전체 probe 예산(${probe_phase_budget}초) 소진으로 실행하지 않음 | — |")
+    break
+  fi
+  level_budget=$(( remaining < probe_level_budget ? remaining : probe_level_budget ))
   set_accommodations "$level"
   probe_log="$log_dir/carelog-probe-L$level.log"
+  level_started=$SECONDS
   start_carelog "probe-L$level" false "$carelog_probe_access_dir" "$valkey_tls"
   probe_pid="$carelog_pid"
   probe_result=FAIL
-  if wait_ready "$probe_pid" "$carelog_ready_url" "carelog-be DEV probe L$level"; then probe_result=PASS; fi
+  if wait_ready "$probe_pid" "$carelog_ready_url" "carelog-be DEV probe L$level" "$level_budget" "$probe_log"; then
+    probe_result=PASS
+  fi
   kill "$probe_pid" 2>/dev/null || true
   wait "$probe_pid" 2>/dev/null || true
+  level_elapsed="$(( SECONDS - level_started ))초"
 
   if [[ "$probe_result" = PASS ]]; then
     if ! assert_profile_prod "$probe_log"; then
       fail_e2e 'L1 assertion failed: DEV-parity probe active profile is not prod.'
     fi
-    probe_rows+=("| $level | ${probe_labels[$level]} | PASS | — |")
+    probe_rows+=("| $level | ${probe_labels[$level]} | PASS | — | $level_elapsed |")
     probe_pass_level=$level
     break
   fi
   cause="$(extract_cause "$probe_log")"
-  probe_rows+=("| $level | ${probe_labels[$level]} | FAIL | $(md_cell "$cause") |")
+  probe_rows+=("| $level | ${probe_labels[$level]} | FAIL | $(md_cell "$cause") | $level_elapsed |")
   annotate_warning "[L$level] ${probe_labels[$level]}: $cause"
   print_failure_block "$probe_log"
 done
