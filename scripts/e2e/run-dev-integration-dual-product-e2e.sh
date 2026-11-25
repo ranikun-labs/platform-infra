@@ -132,7 +132,7 @@ finance_jar="$(find_boot_jar "$finance_source/build/libs")"
 wait_ready() {
   local pid="$1" url="$2" label="$3"
   for _ in $(seq 1 150); do
-    if curl --fail --silent --output /dev/null "$url"; then return 0; fi
+    if curl --fail --silent --max-time 5 --output /dev/null "$url"; then return 0; fi
     if ! kill -0 "$pid" 2>/dev/null; then
       printf '%s process exited before readiness.\n' "$label" >&2
       return 1
@@ -156,6 +156,9 @@ flyway_line="(not run)"
 # Remediation state. Levels are cumulative: 0 none; 1 (a) /run/secrets dir; 2 (b) sslmode=disable;
 # 3 (c) VALKEY_TLS_ENABLED=false. valkey_tls is derived from the level.
 run_secrets_created=0
+# Recorded before any accommodation runs: true when the runner already had /run/secrets (not created by this job).
+run_secrets_preexisted=0
+if [[ -d /run/secrets ]]; then run_secrets_preexisted=1; fi
 valkey_tls=true
 set_accommodations() {
   local level="$1" sslmode_file="/run/secrets/spring.datasource.hikari.data-source-properties.sslmode"
@@ -233,16 +236,18 @@ assert_flyway_v9() {
     return 1
   fi
 }
-# extract_cause: first Description line of the Spring failure block, else the deepest "Caused by" line.
+# extract_cause: known root-cause patterns on "Caused by:" lines (the last, i.e. deepest, match wins); if none,
+# the first ERROR line. Output is redacted, CR-stripped and cut to 240 chars.
+known_cause_pattern='PSQLException|SSL|RedisConnectionException|RedisCommandTimeoutException|Config data resource|does not exist|Connection refused'
 extract_cause() {
   local log="$1" cause=""
-  if [[ -f "$log" ]] && grep -q 'APPLICATION FAILED TO START' "$log"; then
-    cause="$(awk '/^Description:/{d=1; next} d && NF {print; exit}' "$log" || true)"
+  if [[ -f "$log" ]]; then
+    cause="$(grep -E 'Caused by: ' "$log" | grep -E "$known_cause_pattern" | tail -n 1 || true)"
+    if [[ -z "$cause" ]]; then
+      cause="$(grep -E ' ERROR ' "$log" | head -n 1 || true)"
+    fi
   fi
-  if [[ -z "$cause" && -f "$log" ]]; then
-    cause="$(grep -oE 'Caused by: .*' "$log" | tail -n 1 || true)"
-  fi
-  cause="${cause:-원인 미상 (APPLICATION FAILED TO START 블록 없음)}"
+  cause="${cause:-원인 미상 (알려진 원인 패턴과 ERROR 라인 없음)}"
   printf '%s' "$cause" | redact | tr -d '\r' | cut -c1-240
 }
 # print_failure_block: the Spring Boot Description/Action block (masked) into the step log.
@@ -273,10 +278,21 @@ write_probe_section() {
   emit '## DEV 설정 기동 결과'
   if (( ${#probe_rows[@]} == 0 )); then
     note 'probe 결과: **미실행**. 선행 Flyway 부팅 단계에서 중단됨.'
-  elif (( probe_pass_level >= 0 )); then
-    note "probe 결과: **PASS**. 보정 ${probe_pass_level}단계에서 readiness UP (prod profile 확인)."
+  elif (( probe_pass_level == 0 )); then
+    note 'DEV 설정 그대로(기준선): **PASS**. 보정 없이 readiness UP (prod profile 확인).'
+  elif (( probe_pass_level > 0 )); then
+    note "DEV 설정 그대로(기준선): **FAIL** — ${probe_pass_level}단계 누적 보정 후 기동. DEV 정합성 FINDING이며 job 실패 사유가 아님. 최종 판정은 아래 E2E 섹션."
   else
-    note 'probe 결과: **FAIL**. 보정 (a)(b)(c)를 누적 적용해도 DEV 설정 기동이 실패함. DEV 정합성 FINDING이며 job 실패 사유가 아님. 최종 판정은 아래 E2E 섹션.'
+    note 'DEV 설정 그대로(기준선): **FAIL**. 보정 (a)(b)(c)를 누적 적용해도 DEV 설정 기동이 실패함. DEV 정합성 FINDING이며 job 실패 사유가 아님. 최종 판정은 아래 E2E 섹션.'
+  fi
+  if (( ${#probe_rows[@]} > 0 )); then
+    note '결론은 순서 의존적이다: 앞 단계의 실패가 뒤 단계의 원인을 가릴 수 있으므로, 표의 원인은 독립된 원인 목록이 아니다.'
+    note '(a) /run/secrets는 DEV에도 적용될 수 있음 (application-prod.yml:3 configtree에 `optional:` 없음; DEV ECS task는 정적 근거상 파일을 제공하지 않음). CI 전용 차이인지 DEV 결함인지 판단 불가, DEV Task 조회 필요.'
+    if (( run_secrets_preexisted )); then
+      note '/run/secrets: 러너에 L0 이전부터 존재했음 (이 job이 만든 디렉터리 아님).'
+    else
+      note '/run/secrets: L0 이전에 러너에 없었음. (a) 단계에서 이 job이 빈 디렉터리로 생성하고 정리함.'
+    fi
   fi
   note "선행 Flyway 부팅: ${flyway_line}. 보정 (a)(b)(c)를 모두 적용한 상태에서 수행하고 끝나면 보정을 초기화한 뒤 probe를 시작함. 빈 DB의 스키마 검증이 probe 원인에 섞이지 않도록 하기 위함."
   note 'probe 로그 사본(마스킹)은 artifact `dev-integration-dual-product-e2e-logs`로 업로드 (보존 3일).'
