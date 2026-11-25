@@ -59,3 +59,13 @@ Cloud Map gives plain HTTP inside the VPC, matching Gateway-to-Core today.
 - HTTPS: Cloud Map gives plain HTTP. Private HTTPS needs one of: ACM Private CA with ECS Service Connect TLS (not provisioned here), or an internal ALB with a publicly trusted ACM certificate on a domain the project controls (needs a Route 53 private zone and domain). Until one is chosen, Bearer and claims secrets travel in cleartext on the private VPC, as Gateway-to-Core does today. This is a security decision for the owner.
 - Secret ARNs and env values are supplied by the operator. This root does not create them.
 - `CARELOG_ENVIRONMENT` is `dev` in this root (the carelog-be default is `production`).
+
+## Private HTTPS enrollment listener (opt-in)
+
+`carelog_core_auth.https_enrollment` (requires `carelog_core_auth.enabled`) adds a TLS sidecar `carelog-tls-proxy`:
+- Listens on task IP `8443` only and forwards to the app on `127.0.0.1:8080`. The app keeps its `8080` mapping, so Gateway and Core claims traffic is unchanged.
+- Core reaches it through the SG rule on `8443` from `carelog_core_auth.core_security_group_id` only.
+- Inputs are ARNs and a digest-pinned image only. `server_bundle_secret_arn` holds the certificate and key bundle, read as `TLS_BUNDLE_JSON`.
+- Output `carelog_private_https_origin` = `https://dev-carelog.<namespace>:8443`. The host must be in the server certificate SAN. Core enrollment uses it. Claims keep `carelog_private_origin` (`http://...:8080`).
+
+Required proxy image contract (the image source is not in this branch): TLS-only listener on `TASK_IP:8443`, upstream `127.0.0.1:8080`, no `8080` listener on the task IP, and the enrollment path only (`PUT /api/v1/internal/v1/identity/carelog/enrollments/{id}`) with normalized-path checks. The candidate in platform-infra `origin/codex/carelog-dev-tls-preserve-review` `candidates/carelog-tls/` binds `8080` on the task IP and sets `SERVER_ADDRESS=127.0.0.1`, so it cannot be used as-is.

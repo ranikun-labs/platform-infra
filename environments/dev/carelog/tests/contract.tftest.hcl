@@ -165,3 +165,73 @@ run "private_origin_has_no_path" {
     error_message = "Core must receive the origin only (scheme, host, port); Core appends /api/v1 itself."
   }
 }
+
+# Private HTTPS enrollment listener (TLS sidecar on 8443). Gated by carelog_core_auth; the app's 8080 mapping stays.
+run "https_enrollment_sidecar_plans_listener" {
+  command = plan
+
+  variables {
+    shared = merge(var.shared, { namespace_name = "dev.internal" })
+    carelog_core_auth = {
+      enabled                = true
+      valkey_tls_enabled     = true
+      core_security_group_id = "sg-0123456789abcdef1"
+      https_enrollment = {
+        proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
+        server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+      }
+    }
+  }
+
+  assert {
+    condition     = output.carelog_private_https_origin == "https://dev-carelog.dev.internal:8443" && output.carelog_private_origin == "http://dev-carelog.dev.internal:8080"
+    error_message = "HTTPS enrollment origin must use port 8443 with the Cloud Map host; the claims origin stays on the product port."
+  }
+  assert {
+    condition     = length([for c in jsondecode(module.service.baseline_container_definitions) : c if c.name == "carelog-tls-proxy"]) == 1
+    error_message = "The TLS sidecar container must be in the task definition."
+  }
+  assert {
+    condition     = jsondecode(module.service.baseline_container_definitions)[0].portMappings == [{ containerPort = 8080, protocol = "tcp" }]
+    error_message = "The app container keeps its 8080 mapping; the sidecar must not change the product port."
+  }
+  assert {
+    condition     = length(aws_vpc_security_group_ingress_rule.core_enrollment_tls) == 1 && aws_vpc_security_group_ingress_rule.core_enrollment_tls[0].from_port == 8443 && aws_vpc_security_group_ingress_rule.core_enrollment_tls[0].referenced_security_group_id == "sg-0123456789abcdef1"
+    error_message = "Only the Core security group may reach 8443."
+  }
+}
+
+run "https_enrollment_requires_core_auth" {
+  command = plan
+
+  variables {
+    carelog_core_auth = {
+      enabled = false
+      https_enrollment = {
+        proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
+        server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+      }
+    }
+  }
+  expect_failures = [var.carelog_core_auth]
+}
+
+run "https_enrollment_rejects_unpinned_image" {
+  command = plan
+
+  variables {
+    carelog_core_auth = {
+      enabled                = true
+      valkey_tls_enabled     = true
+      core_security_group_id = "sg-0123456789abcdef1"
+      https_enrollment = {
+        proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy:latest"
+        ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
+        server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+      }
+    }
+  }
+  expect_failures = [var.carelog_core_auth]
+}

@@ -29,6 +29,14 @@ variable "carelog_core_auth" {
     enabled                = optional(bool, false)
     valkey_tls_enabled     = optional(bool)
     core_security_group_id = optional(string)
+    # Private HTTPS enrollment listener (TLS sidecar on task IP 8443, enrollment path only). Null = no sidecar.
+    # Secret values never go here: the bundle is referenced by Secrets Manager ARN only.
+    https_enrollment = optional(object({
+      proxy_image              = string # repo@sha256:<64 hex>, digest pinned
+      ecr_repository_arn       = string
+      server_bundle_secret_arn = string # secret holding certificate and key as TLS_BUNDLE_JSON, no JSON-key suffix
+      kms_key_arns             = optional(set(string), [])
+    }))
   })
   default = {}
   validation {
@@ -40,6 +48,23 @@ variable "carelog_core_auth" {
   validation {
     condition     = var.carelog_core_auth.core_security_group_id == null || can(regex("^sg-[0-9a-f]+$", var.carelog_core_auth.core_security_group_id))
     error_message = "core_security_group_id must be a security group ID (sg-...)."
+  }
+  validation {
+    condition     = var.carelog_core_auth.https_enrollment == null || var.carelog_core_auth.enabled
+    error_message = "carelog_core_auth.https_enrollment requires carelog_core_auth.enabled = true."
+  }
+  validation {
+    condition = var.carelog_core_auth.https_enrollment == null || (
+      can(regex("^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$", var.carelog_core_auth.https_enrollment.proxy_image))
+    )
+    error_message = "https_enrollment.proxy_image must be a private ECR image pinned by digest (repo@sha256:...)."
+  }
+  validation {
+    condition = var.carelog_core_auth.https_enrollment == null || (
+      can(regex("^arn:aws:ecr:[a-z0-9-]+:[0-9]{12}:repository/[a-z0-9._/-]+$", var.carelog_core_auth.https_enrollment.ecr_repository_arn)) &&
+      can(regex("^arn:aws:secretsmanager:[^:]+:[0-9]{12}:secret:[^:]+$", var.carelog_core_auth.https_enrollment.server_bundle_secret_arn))
+    )
+    error_message = "https_enrollment needs an ECR repository ARN and a Secrets Manager secret ARN (no JSON-key suffix)."
   }
 }
 

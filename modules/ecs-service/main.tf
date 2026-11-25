@@ -35,7 +35,7 @@ data "aws_iam_policy_document" "execution" {
   }
   statement {
     actions   = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
-    resources = concat([var.ecr_repository_arn], var.cloudflared == null ? [] : [var.cloudflared.ecr_repository_arn])
+    resources = concat([var.ecr_repository_arn], var.cloudflared == null ? [] : [var.cloudflared.ecr_repository_arn], tolist(var.additional_ecr_repository_arns))
   }
   statement {
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
@@ -118,6 +118,8 @@ resource "aws_ecs_task_definition" "baseline" {
     logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.service.name, awslogs-region = var.region, awslogs-stream-prefix = "app" } }
     }, length(var.app_mount_points) == 0 ? {} : {
     mountPoints = [for m in var.app_mount_points : { sourceVolume = m.source_volume, containerPath = m.container_path, readOnly = m.read_only }]
+    }, length(var.app_depends_on) == 0 ? {} : {
+    dependsOn = [for d in var.app_depends_on : { containerName = d.container_name, condition = d.condition }]
     })], var.cloudflared == null ? [] : [{
     name      = "cloudflared"
     image     = var.cloudflared.image
@@ -133,7 +135,7 @@ resource "aws_ecs_task_definition" "baseline" {
         awslogs-stream-prefix = "tunnel"
       }
     }
-  }]))
+  }], var.additional_containers))
   tags = var.tags
 }
 resource "aws_ecs_service" "service" {

@@ -94,3 +94,25 @@ variable "app_mount_points" {
     error_message = "Mount container_path must be absolute."
   }
 }
+
+# Extra containers appended after the app (and cloudflared) definitions, passed through raw. Each entry is a
+# complete ECS container definition. Default [] keeps the task definition byte-identical.
+variable "additional_containers" {
+  type    = list(any)
+  default = []
+}
+
+# Extra ECR repositories the execution role may pull from (sidecar and init images). Default empty.
+variable "additional_ecr_repository_arns" {
+  type    = set(string)
+  default = []
+}
+
+# Start conditions for the app container (for example an init container with SUCCESS). Default [].
+variable "app_depends_on" {
+  type = list(object({
+    container_name = string
+    condition      = string
+  }))
+  default = []
+}
