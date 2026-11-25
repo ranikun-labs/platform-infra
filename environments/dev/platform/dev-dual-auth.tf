@@ -17,9 +17,9 @@ locals {
     PLATFORM_IDENTITY_FINANCE_REFERENCE_JWT_ACCESS_TOKEN_TTL_SECONDS = "300"
     PLATFORM_IDENTITY_CARELOG_REGISTRATION_ENABLED                   = "true"
     PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED                     = "true"
-    PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL                    = var.carelog_private_base_url
+    PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL                    = var.carelog_enrollment_origin
     PLATFORM_IDENTITY_PRODUCT_CLAIMS_ENABLED                         = "true"
-    PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL                        = var.carelog_private_base_url
+    PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL                        = var.carelog_enrollment_origin
     PLATFORM_IDENTITY_REDIS_TLS_ENABLED                              = tostring(var.dev_dual_auth.redis_tls_enabled)
   } : {}
 
@@ -33,7 +33,6 @@ locals {
     SPRING_PROFILES_ACTIVE                                        = "finance-trusted-context-reference"
     PLATFORM_ENVIRONMENT                                          = "dev"
     PLATFORM_GATEWAY_CARELOG_REGISTRATION_ENABLED                 = "true"
-    PLATFORM_GATEWAY_CARELOG_BE_URI                               = var.carelog_private_base_url
     PLATFORM_GATEWAY_FINANCE_BE_URI                               = "http://${var.dev_dual_auth.finance_service_name}.${var.namespace_name}:${var.dev_dual_auth.finance_container_port}"
     PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_ENABLED              = "false"
     PLATFORM_GATEWAY_FINANCE_REFERENCE_ENABLED                    = "true"

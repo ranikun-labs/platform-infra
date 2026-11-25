@@ -104,12 +104,57 @@ run "no_alb_requires_connector" {
   expect_failures = [var.gateway_cloudflared]
 }
 
+# Opt-ins off: the composed Gateway and Core container inputs must be exactly the origin/main shape.
+run "default_containers_match_origin" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      jsonencode(output.gateway_container_environment) == jsonencode({
+        PLATFORM_GATEWAY_PORT            = "8080"
+        PLATFORM_GATEWAY_MANAGEMENT_PORT = "9091"
+        PLATFORM_GATEWAY_AUTH_URI        = "http://test-dev-core.dev.internal:8081"
+      }),
+      jsonencode(output.gateway_container_secrets) == jsonencode({}),
+      jsonencode(output.core_container_environment) == jsonencode({ PLATFORM_CORE_PORT = "8081" }),
+      jsonencode(output.core_container_secrets) == jsonencode({}),
+    ])
+    error_message = "With dev_dual_auth disabled the Gateway and Core container inputs must match origin/main."
+  }
+}
+
 run "dev_dual_auth_enabled_plans_with_secret_arns" {
   command = plan
   variables {
-    carelog_private_base_url = "https://carelog.dev.internal"
+    carelog_enrollment_origin = "https://carelog.dev.internal"
+    gateway_runtime = merge(var.gateway_runtime, {
+      environment = {
+        PLATFORM_GATEWAY_CARELOG_RAG_URI  = "http://carelog-rag.dev.internal:8080"
+        PLATFORM_GATEWAY_CARELOG_BE_URI   = "http://dev-carelog.dev.internal:8080"
+        PLATFORM_GATEWAY_REDIS_HOST       = "platform-valkey.dev.internal"
+        PLATFORM_GATEWAY_REDIS_PORT       = "6379"
+        PLATFORM_GATEWAY_REDIS_KEY_PREFIX = "platform:gateway:"
+      }
+      secrets = {
+        PLATFORM_GATEWAY_INTERNAL_SECRET         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/gateway-internal-AbCdEf"
+        PLATFORM_GATEWAY_JWT_VERIFICATION_SECRET = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
+      }
+    })
+    core_runtime = merge(var.core_runtime, {
+      environment = {
+        PLATFORM_IDENTITY_REDIS_HOST     = "platform-valkey.dev.internal"
+        PLATFORM_IDENTITY_REDIS_PORT     = "6379"
+        PLATFORM_IDENTITY_DATASOURCE_URL = "jdbc:postgresql://platform-db.dev.internal:5432/platform"
+      }
+      secrets = {
+        PLATFORM_IDENTITY_DATASOURCE_USERNAME = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-db-user-AbCdEf"
+        PLATFORM_IDENTITY_DATASOURCE_PASSWORD = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-db-password-AbCdEf"
+        PLATFORM_IDENTITY_JWT_SECRET_KEY      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-jwt-AbCdEf"
+      }
+    })
     dev_dual_auth = {
       enabled                            = true
+      redis_tls_enabled                  = false
       jwt_signing_key_secret_arn         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
       finance_trusted_context_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-trusted-context-AbCdEf"
       carelog_enrollment_secret_arn      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-enrollment-AbCdEf"
@@ -120,24 +165,37 @@ run "dev_dual_auth_enabled_plans_with_secret_arns" {
     condition     = module.core.service_name != null && module.gateway.service_name != null
     error_message = "DEV dual-auth must plan both services with the same Core and Gateway topology."
   }
+  assert {
+    condition     = output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"] == "https://carelog.dev.internal" && output.core_container_environment["PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL"] == "https://carelog.dev.internal"
+    error_message = "Core must call Carelog at the origin only; Core appends /api/v1 itself."
+  }
+  assert {
+    condition     = output.gateway_container_environment["PLATFORM_GATEWAY_CARELOG_BE_URI"] == "http://dev-carelog.dev.internal:8080"
+    error_message = "dual-auth must not override the Gateway Carelog backend; the gateway_runtime value stays authoritative."
+  }
+  assert {
+    condition     = output.core_container_environment["SPRING_PROFILES_ACTIVE"] == "finance-reference,dev" && output.core_container_environment["PLATFORM_IDENTITY_REDIS_TLS_ENABLED"] == "false"
+    error_message = "Core dual-auth profile and Redis TLS flag must come from the opt-in."
+  }
 }
 
 run "dev_dual_auth_requires_secret_arns" {
   command = plan
   variables {
-    carelog_private_base_url = "https://carelog.dev.internal"
+    carelog_enrollment_origin = "https://carelog.dev.internal"
     dev_dual_auth = {
       enabled                    = true
+      redis_tls_enabled          = true
       jwt_signing_key_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf:key::"
     }
   }
   expect_failures = [var.dev_dual_auth]
 }
 
-run "dev_dual_auth_requires_carelog_origin_without_path" {
+run "dev_dual_auth_requires_redis_tls_setting" {
   command = plan
   variables {
-    carelog_private_base_url = "https://carelog.dev.internal/api"
+    carelog_enrollment_origin = "https://carelog.dev.internal"
     dev_dual_auth = {
       enabled                            = true
       jwt_signing_key_secret_arn         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
@@ -146,5 +204,58 @@ run "dev_dual_auth_requires_carelog_origin_without_path" {
       product_claims_secret_arn          = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-claims-AbCdEf"
     }
   }
-  expect_failures = [var.carelog_private_base_url]
+  expect_failures = [var.dev_dual_auth]
+}
+
+run "dev_dual_auth_requires_gateway_runtime_keys" {
+  command = plan
+  variables {
+    carelog_enrollment_origin = "https://carelog.dev.internal"
+    core_runtime = merge(var.core_runtime, {
+      environment = {
+        PLATFORM_IDENTITY_REDIS_HOST     = "platform-valkey.dev.internal"
+        PLATFORM_IDENTITY_REDIS_PORT     = "6379"
+        PLATFORM_IDENTITY_DATASOURCE_URL = "jdbc:postgresql://platform-db.dev.internal:5432/platform"
+      }
+      secrets = {
+        PLATFORM_IDENTITY_DATASOURCE_USERNAME = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-db-user-AbCdEf"
+        PLATFORM_IDENTITY_DATASOURCE_PASSWORD = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-db-password-AbCdEf"
+        PLATFORM_IDENTITY_JWT_SECRET_KEY      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-jwt-AbCdEf"
+      }
+    })
+    dev_dual_auth = {
+      enabled                            = true
+      redis_tls_enabled                  = false
+      jwt_signing_key_secret_arn         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
+      finance_trusted_context_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-trusted-context-AbCdEf"
+      carelog_enrollment_secret_arn      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-enrollment-AbCdEf"
+      product_claims_secret_arn          = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-claims-AbCdEf"
+    }
+  }
+  # Empty gateway_runtime from the file-level fixture.
+  expect_failures = [var.gateway_runtime]
+}
+
+run "carelog_origin_rejects_path" {
+  command = plan
+  variables {
+    carelog_enrollment_origin = "https://carelog.dev.internal/api"
+  }
+  expect_failures = [var.carelog_enrollment_origin]
+}
+
+run "carelog_origin_rejects_userinfo_and_query" {
+  command = plan
+  variables {
+    carelog_enrollment_origin = "https://user@carelog.dev.internal?x=1"
+  }
+  expect_failures = [var.carelog_enrollment_origin]
+}
+
+run "carelog_origin_rejects_non_http_scheme" {
+  command = plan
+  variables {
+    carelog_enrollment_origin = "ftp://carelog.dev.internal"
+  }
+  expect_failures = [var.carelog_enrollment_origin]
 }

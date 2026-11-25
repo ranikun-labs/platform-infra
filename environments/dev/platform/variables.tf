@@ -80,19 +80,19 @@ variable "workload_public_ip" {
   default = false
 }
 
-# DEV-only: one Core serving Carelog auth and Finance reference auth together. Off by default, so the
-# baseline Core/Gateway environment is unchanged. Values are secret ARNs only; never secret values.
-variable "carelog_private_base_url" {
+# DEV-only dual-auth opt-in: one Core serving Carelog auth and Finance reference auth together. Off by default, so the
+# baseline Core/Gateway environment is unchanged. Values are secret ARNs or origins only; never secret values.
+variable "carelog_enrollment_origin" {
   type        = string
   default     = null
-  description = "Private HTTPS origin of DEV Carelog (no path, query or userinfo). Placeholder: the Carelog lane defines the endpoint. Required when dev_dual_auth.enabled."
+  description = "Private origin of DEV Carelog for Core enrollment and product claims: scheme, host and port only, no path. Core appends /api/v1/... itself. Required when dev_dual_auth.enabled."
   validation {
-    condition     = var.carelog_private_base_url == null || can(regex("^https://[^/?#@ ]+$", var.carelog_private_base_url))
-    error_message = "carelog_private_base_url must be an https origin without a path, query, fragment or userinfo."
+    condition     = var.carelog_enrollment_origin == null || can(regex("^https?://[^/?#@ ]+$", var.carelog_enrollment_origin))
+    error_message = "carelog_enrollment_origin must be an http or https origin without a path, query, fragment or userinfo."
   }
   validation {
-    condition     = !var.dev_dual_auth.enabled || var.carelog_private_base_url != null
-    error_message = "carelog_private_base_url is required when dev_dual_auth.enabled is true."
+    condition     = !var.dev_dual_auth.enabled || var.carelog_enrollment_origin != null
+    error_message = "carelog_enrollment_origin is required when dev_dual_auth.enabled is true."
   }
 }
 
@@ -109,8 +109,8 @@ variable "dev_dual_auth" {
     product_claims_secret_arn = optional(string)
     finance_service_name      = optional(string, "dev-finance")
     finance_container_port    = optional(number, 8080)
-    # Requested DEV value. Only valid once managed Valkey TLS is verified end to end (see README).
-    redis_tls_enabled = optional(bool, true)
+    # Required when enabled (no default). Must match the Valkey endpoint actually in use; true only once managed Valkey TLS is verified end to end (see README).
+    redis_tls_enabled = optional(bool)
   })
   default     = { enabled = false }
   description = "DEV-only dual-auth opt-in (Core Carelog + Finance reference, Gateway Finance route). Guards in platform-services reject prod markers."
@@ -124,6 +124,10 @@ variable "dev_dual_auth" {
       ] : arn != null && can(regex("^arn:aws:secretsmanager:[^:]+:[0-9]{12}:secret:[^:]+$", arn))
     ])
     error_message = "dev_dual_auth requires Secrets Manager secret ARNs (without JSON-key suffixes) for all four secret fields."
+  }
+  validation {
+    condition     = !var.dev_dual_auth.enabled || var.dev_dual_auth.redis_tls_enabled != null
+    error_message = "dev_dual_auth.redis_tls_enabled is required when dev_dual_auth.enabled is true; set it to match the Valkey endpoint in use."
   }
   validation {
     condition     = can(regex("^[a-z0-9-]+$", var.dev_dual_auth.finance_service_name)) && var.dev_dual_auth.finance_container_port > 0 && var.dev_dual_auth.finance_container_port < 65536
