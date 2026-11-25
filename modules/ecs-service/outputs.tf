@@ -6,3 +6,4 @@ output "task_role_arn" { value = aws_iam_role.app.arn }
 output "execution_role_arn" { value = aws_iam_role.execution.arn }
 output "log_group_name" { value = aws_cloudwatch_log_group.service.name }
 output "baseline_task_definition_arn" { value = aws_ecs_task_definition.baseline.arn }
+output "baseline_container_definitions" { value = aws_ecs_task_definition.baseline.container_definitions }

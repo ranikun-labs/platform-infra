@@ -8,15 +8,43 @@ variable "aws_account_id" {
   }
 }
 # Supply only the required shared/platform outputs, not their entire state.
+# namespace_name is only used for the carelog_private_origin output.
 variable "shared" {
   type = object({
     vpc_id             = string
     private_subnet_ids = list(string)
     cluster_arn        = string
     namespace_id       = string
+    namespace_name     = optional(string)
   })
 }
 variable "gateway_security_group_id" { type = string }
+
+# DEV opt-in for Core-to-Carelog enrollment and internal claims. Off by default: with enabled = false every
+# input below is ignored and the task definition matches the pre-change baseline. When enabled it sets the
+# carelog-be prod-profile contract (main.tf), mounts /run/secrets and opens the Core ingress rule.
+variable "carelog_core_auth" {
+  description = "DEV-only opt-in for Core enrollment and claims. valkey_tls_enabled and core_security_group_id are required when enabled."
+  type = object({
+    enabled                = optional(bool, false)
+    valkey_tls_enabled     = optional(bool)
+    core_security_group_id = optional(string)
+  })
+  default = {}
+  validation {
+    condition = !var.carelog_core_auth.enabled || (
+      var.carelog_core_auth.valkey_tls_enabled != null && var.carelog_core_auth.core_security_group_id != null
+    )
+    error_message = "carelog_core_auth requires valkey_tls_enabled and core_security_group_id when enabled."
+  }
+  validation {
+    condition     = var.carelog_core_auth.core_security_group_id == null || can(regex("^sg-[0-9a-f]+$", var.carelog_core_auth.core_security_group_id))
+    error_message = "core_security_group_id must be a security group ID (sg-...)."
+  }
+}
+
+# Every check below that is new on this branch applies only when carelog_core_auth.enabled, so the default
+# plan accepts exactly the inputs the baseline accepted.
 variable "runtime" {
   type = object({
     image                     = string
@@ -41,26 +69,34 @@ variable "runtime" {
     log_retention_days = number
   })
   validation {
-    condition = alltrue([for k in [
+    condition = !var.carelog_core_auth.enabled || alltrue([for k in [
       "SPRING_DATASOURCE_URL", "REDIS_HOST", "REDIS_PORT", "CARELOG_CORS_ALLOWED_ORIGINS",
       "JWT_ACCESS_TOKEN_VALIDITY", "JWT_REFRESH_TOKEN_VALIDITY",
     ] : contains(keys(var.runtime.environment), k)])
-    error_message = "runtime.environment must set SPRING_DATASOURCE_URL, REDIS_HOST, REDIS_PORT, CARELOG_CORS_ALLOWED_ORIGINS, JWT_ACCESS_TOKEN_VALIDITY and JWT_REFRESH_TOKEN_VALIDITY. Fixed DEV flags are set by main.tf."
+    error_message = "With carelog_core_auth enabled, runtime.environment must set SPRING_DATASOURCE_URL, REDIS_HOST, REDIS_PORT, CARELOG_CORS_ALLOWED_ORIGINS, JWT_ACCESS_TOKEN_VALIDITY and JWT_REFRESH_TOKEN_VALIDITY. Fixed DEV flags are set by main.tf."
   }
   validation {
-    condition = alltrue([for k in [
+    condition = !var.carelog_core_auth.enabled || alltrue([for k in [
       "SPRING_DATASOURCE_USERNAME", "SPRING_DATASOURCE_PASSWORD", "JWT_SECRET_KEY", "GATEWAY_INTERNAL_SECRET",
       "CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET", "CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET",
     ] : contains(keys(var.runtime.secrets), k)])
-    error_message = "runtime.secrets must reference the DB credentials, JWT key, gateway secret, enrollment write secret and claims read secret."
+    error_message = "With carelog_core_auth enabled, runtime.secrets must reference the DB credentials, JWT key, gateway secret, enrollment write secret and claims read secret."
   }
   validation {
-    condition     = alltrue([for v in values(var.runtime.secrets) : can(regex("^arn:aws:(secretsmanager|ssm):", v))])
-    error_message = "Every runtime.secrets value must be a Secrets Manager or SSM Parameter Store reference ARN. Never supply secret values."
+    condition     = !var.carelog_core_auth.enabled || alltrue([for v in values(var.runtime.secrets) : can(regex("^arn:aws:(secretsmanager|ssm):", v))])
+    error_message = "With carelog_core_auth enabled, every runtime.secrets value must be a Secrets Manager or SSM Parameter Store reference ARN. Never supply secret values."
   }
   validation {
-    condition     = alltrue([for v in values(var.runtime.secrets) : anytrue([for a in var.runtime.execution_secret_arns : startswith(v, a)])])
-    error_message = "Each secret reference must be covered by execution_secret_arns (exact underlying ARN, without JSON-key suffix)."
+    condition     = !var.carelog_core_auth.enabled || alltrue([for v in values(var.runtime.secrets) : anytrue([for a in var.runtime.execution_secret_arns : startswith(v, a)])])
+    error_message = "With carelog_core_auth enabled, each secret reference must be covered by execution_secret_arns (exact underlying ARN, without JSON-key suffix)."
+  }
+  validation {
+    # Compare underlying secret ARNs: strip any ECS JSON-key suffix (secretsmanager ARNs have 7 colon-separated parts).
+    condition = !var.carelog_core_auth.enabled || length(distinct([for k in [
+      "GATEWAY_INTERNAL_SECRET", "CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET", "CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET",
+      ] : join(":", slice(split(":", lookup(var.runtime.secrets, k, "")), 0, min(7, length(split(":", lookup(var.runtime.secrets, k, ""))))))
+    ])) == 3
+    error_message = "With carelog_core_auth enabled, the gateway, enrollment and claims secret ARNs must be pairwise distinct."
   }
 }
 variable "tags" {
@@ -78,21 +114,5 @@ variable "workload_public_subnet_ids" {
   validation {
     condition     = !var.workload_public_ip || length(var.workload_public_subnet_ids) > 0
     error_message = "Public IP tasks require explicit public subnets."
-  }
-}
-
-variable "runtime_config_mount" {
-  description = "Mount an empty ephemeral volume at /run/secrets so the prod configtree import resolves. Required for DEV boot with the current application-prod.yml; secrets still come from env references."
-  type        = bool
-  default     = false
-}
-
-variable "core_security_group_id" {
-  description = "Core service security group that may call carelog on the product port (enrollment and claims). Null adds no rule."
-  type        = string
-  default     = null
-  validation {
-    condition     = var.core_security_group_id == null ? true : can(regex("^sg-[0-9a-f]+$", var.core_security_group_id))
-    error_message = "Supply a security group ID (sg-...) or null."
   }
 }

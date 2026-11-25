@@ -59,37 +59,109 @@ run "gateway_only_service_ingress" {
   }
 }
 
-run "core_ingress_is_opt_in" {
+# Opt-in off: the container must keep the pre-change shape exactly (only the operator's env and secrets, no mounts).
+run "default_container_matches_baseline" {
   command = plan
 
   assert {
-    condition     = length(aws_vpc_security_group_ingress_rule.core) == 0
-    error_message = "Core ingress must be absent until its security group is supplied."
+    condition     = jsondecode(module.service.baseline_container_definitions)[0].environment == [for k in sort(keys(var.runtime.environment)) : { name = k, value = var.runtime.environment[k] }]
+    error_message = "With carelog_core_auth disabled the container environment must equal runtime.environment."
+  }
+  assert {
+    condition     = jsondecode(module.service.baseline_container_definitions)[0].secrets == [for k in sort(keys(var.runtime.secrets)) : { name = k, valueFrom = var.runtime.secrets[k] }]
+    error_message = "With carelog_core_auth disabled the container secrets must equal runtime.secrets."
+  }
+  assert {
+    condition     = !contains(keys(jsondecode(module.service.baseline_container_definitions)[0]), "mountPoints") && length(aws_vpc_security_group_ingress_rule.core) == 0
+    error_message = "With carelog_core_auth disabled there must be no /run/secrets mount and no Core ingress."
   }
 }
 
-run "core_ingress_and_runtime_config_mount" {
+run "core_auth_enabled_applies_prod_contract" {
   command = plan
 
   variables {
-    core_security_group_id = "sg-0123456789abcdef1"
-    runtime_config_mount   = true
+    carelog_core_auth = {
+      enabled                = true
+      valkey_tls_enabled     = true
+      core_security_group_id = "sg-0123456789abcdef1"
+    }
   }
 
+  assert {
+    condition = alltrue([
+      contains(jsondecode(module.service.baseline_container_definitions)[0].environment, { name = "SPRING_PROFILES_ACTIVE", value = "prod" }),
+      contains(jsondecode(module.service.baseline_container_definitions)[0].environment, { name = "VALKEY_TLS_ENABLED", value = "true" }),
+      contains(jsondecode(module.service.baseline_container_definitions)[0].environment, { name = "CARELOG_IDENTITY_ENROLLMENT_ENABLED", value = "true" }),
+      contains(jsondecode(module.service.baseline_container_definitions)[0].environment, { name = "CARELOG_INTERNAL_IDENTITY_CLAIMS_ENABLED", value = "true" }),
+    ])
+    error_message = "Enabled Core auth must set the carelog-be prod profile contract."
+  }
+  assert {
+    condition     = jsondecode(module.service.baseline_container_definitions)[0].mountPoints == [{ sourceVolume = "runtime-config", containerPath = "/run/secrets", readOnly = true }]
+    error_message = "Enabled Core auth must mount runtime-config read-only at /run/secrets."
+  }
   assert {
     condition     = length(aws_vpc_security_group_ingress_rule.core) == 1 && aws_vpc_security_group_ingress_rule.core[0].referenced_security_group_id == "sg-0123456789abcdef1" && aws_vpc_security_group_ingress_rule.core[0].from_port == 8080
     error_message = "Only the supplied Core security group may reach the product port through the Core rule."
   }
 }
 
-run "rejects_plaintext_secret_values" {
+run "core_auth_requires_valkey_tls_and_core_sg" {
   command = plan
 
   variables {
+    carelog_core_auth = { enabled = true }
+  }
+  expect_failures = [var.carelog_core_auth]
+}
+
+run "rejects_non_arn_core_sg" {
+  command = plan
+
+  variables {
+    carelog_core_auth = { enabled = false, core_security_group_id = "not-a-sg" }
+  }
+  expect_failures = [var.carelog_core_auth]
+}
+
+run "core_auth_rejects_plaintext_secret_values" {
+  command = plan
+
+  variables {
+    carelog_core_auth = { enabled = true, valkey_tls_enabled = true, core_security_group_id = "sg-0123456789abcdef1" }
     runtime = merge(var.runtime, {
       secrets = merge(var.runtime.secrets, { JWT_SECRET_KEY = "not-an-arn-plaintext-value" })
     })
   }
 
   expect_failures = [var.runtime]
+}
+
+run "core_auth_rejects_shared_enrollment_and_claims_secret" {
+  command = plan
+
+  variables {
+    carelog_core_auth = { enabled = true, valkey_tls_enabled = true, core_security_group_id = "sg-0123456789abcdef1" }
+    runtime = merge(var.runtime, {
+      secrets = merge(var.runtime.secrets, {
+        CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/enrollment"
+      })
+    })
+  }
+
+  expect_failures = [var.runtime]
+}
+
+run "private_origin_has_no_path" {
+  command = plan
+
+  variables {
+    shared = merge(var.shared, { namespace_name = "dev.internal" })
+  }
+
+  assert {
+    condition     = output.carelog_private_origin == "http://dev-carelog.dev.internal:8080"
+    error_message = "Core must receive the origin only (scheme, host, port); Core appends /api/v1 itself."
+  }
 }

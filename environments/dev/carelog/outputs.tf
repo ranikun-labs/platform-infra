@@ -4,3 +4,8 @@ output "security_group_id" { value = module.service.security_group_id }
 output "discovery_service_arn" { value = module.service.discovery_service_arn }
 output "baseline_task_definition_arn" { value = module.service.baseline_task_definition_arn }
 output "task_role_arn" { value = module.service.task_role_arn }
+# Core-facing origin: scheme, host and port only. Core adapters append /api/v1/... themselves.
+# Null until shared.namespace_name is supplied.
+output "carelog_private_origin" {
+  value = var.shared.namespace_name == null ? null : "http://dev-carelog.${var.shared.namespace_name}:${var.runtime.container_port}"
+}

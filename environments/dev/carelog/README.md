@@ -10,44 +10,49 @@ The initial desired count defaults to 0 for bootstrap; omit `runtime.initial_des
 
 Baseline revisions are retained across Terraform replacement and destroy. Release owners may deregister old revisions only after verifying that no service or other workload references them and the agreed rollback retention period has passed.
 
-## carelog-be prod profile on DEV (enrollment and claims)
+## Core enrollment and claims on DEV (`carelog_core_auth`, off by default)
 
-Source contract: `carelog-be` `origin/dev` `application-prod.yml`, `EnrollmentController`, `InternalIdentityClaimsController`. The root sets fixed flags in `main.tf` (`fixed_environment`), which override `runtime.environment`:
+`carelog_core_auth.enabled = false` (the default) leaves the task definition byte-identical to the pre-change baseline: no fixed environment, no `/run/secrets` mount, no Core ingress rule. `tests/contract.tftest.hcl` asserts this.
+
+When `enabled = true`, the root applies the carelog-be prod-profile contract in `main.tf` (`local.core_auth_environment`), which overrides `runtime.environment`:
 
 - `SPRING_PROFILES_ACTIVE=prod` (required; without it the prod YAML is not loaded)
 - `CARELOG_IDENTITY_ENROLLMENT_ENABLED=true` (enables `PUT /api/v1/internal/v1/identity/carelog/enrollments/{accountId}`)
 - `CARELOG_INTERNAL_IDENTITY_CLAIMS_ENABLED=true` (enables `GET /api/v1/internal/identity/claims/{accountId}`). Overrides the literal `false` in `application-prod.yml`. Note: `docs/operations/carelog-v1-container-foundation.md` says this flag stays `false` for non-cutover deployments. Confirm with the Identity owner before apply.
-- `VALKEY_TLS_ENABLED=true`, `CARELOG_FLYWAY_ENABLED=false`, `SPRING_FLYWAY_ENABLED=false`, `CARELOG_ENVIRONMENT=dev`
+- `VALKEY_TLS_ENABLED` from the required input `carelog_core_auth.valkey_tls_enabled` (no default; it must match the Valkey endpoint actually in use)
+- `CARELOG_FLYWAY_ENABLED=false`, `SPRING_FLYWAY_ENABLED=false`, `CARELOG_ENVIRONMENT=dev`
+- `runtime_config_mount` is derived: an empty ephemeral volume is mounted at `/run/secrets`, which satisfies the non-optional `spring.config.import: configtree:/run/secrets/`. The app reads secret values from env references, so no init container is needed.
+
+It also requires `carelog_core_auth.core_security_group_id` (`sg-...`), which opens the product port to Core only.
 
 ### Secrets (references only)
 
-`runtime.secrets` maps the container env name to a Secrets Manager or SSM ARN. Every reference must also be listed in `runtime.execution_secret_arns`, without a JSON-key suffix. Validation rejects a missing required key and a non-ARN value.
+`runtime.secrets` maps the container env name to a Secrets Manager or SSM ARN. Every reference must also be listed in `runtime.execution_secret_arns`, without a JSON-key suffix. With the opt-in enabled, validation requires these keys (names only):
 
-Required keys (names only):
 - `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`: RDS runtime role
 - `JWT_SECRET_KEY`: existing Carelog JWT signing key (preserve current)
 - `GATEWAY_INTERNAL_SECRET`: shared Gateway-to-Carelog secret
-- `CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET`: Core enrollment Bearer secret (at least 32 chars, distinct from the gateway and claims secrets)
-- `CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET`: Core claims secret (at least 32 chars, distinct from gateway)
+- `CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET`: Core enrollment Bearer secret (at least 32 chars)
+- `CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET`: Core claims secret (at least 32 chars)
+
+The gateway, enrollment and claims secret ARNs must be pairwise distinct (JSON-key suffixes are ignored in the comparison). Plaintext values are rejected.
 
 Optional: `SPRING_DATA_REDIS_USERNAME`, `SPRING_DATA_REDIS_PASSWORD` (Valkey ACL, only if ACL is enabled on the cluster).
 
-Required `runtime.environment` keys: `SPRING_DATASOURCE_URL` (RDS JDBC URL, no credentials), `REDIS_HOST`, `REDIS_PORT`, `CARELOG_CORS_ALLOWED_ORIGINS`, `JWT_ACCESS_TOKEN_VALIDITY`, `JWT_REFRESH_TOKEN_VALIDITY` (existing ms values).
+With the opt-in enabled, `runtime.environment` must set `SPRING_DATASOURCE_URL` (RDS JDBC URL, no credentials), `REDIS_HOST`, `REDIS_PORT`, `CARELOG_CORS_ALLOWED_ORIGINS`, `JWT_ACCESS_TOKEN_VALIDITY`, `JWT_REFRESH_TOKEN_VALIDITY` (existing ms values).
 
-### /run/secrets and /run/rds-ca.pem
+### Core-side origin
 
-- `runtime_config_mount = true` mounts an empty ephemeral task volume at `/run/secrets`. This satisfies `spring.config.import: configtree:/run/secrets/`, which is non-optional. The app reads secret values from env references, so no init container or file materialization is needed. Default is `false`, which is the module's current behavior; DEV boot needs `true`.
-- `/run/rds-ca.pem` is hardcoded by `application-prod.yml` (`sslrootcert`). Platform cannot supply it without a runtime fetch or an init container. **Required carelog-be change (not made here):** in `carelog-be/Dockerfile` runtime stage, before `USER 10001:10001`, copy a pinned AWS RDS CA bundle to `/run/rds-ca.pem` (for example `COPY --chmod=0444 certs/rds-ca.pem /run/rds-ca.pem`, read-only, public, reviewed). Also `RUN mkdir -p /run/secrets`. Until that lands, DEV boot fails with `sslrootcert` missing and this root cannot fix it.
+`output carelog_private_origin` = `http://dev-carelog.<namespace_name>:8080`. Supply `shared.namespace_name` to get it (null otherwise). It has **no path**: Core adapters append `/api/v1/...` themselves, so the Core settings are:
 
-### Core-side network and values (for the Core/Finance lane)
+- `PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL=<carelog_private_origin>`. Auth: `Authorization: Bearer <value of CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET>`. Do not send `X-Service-Id`, `X-Service-Secret`, `X-Gateway-Secret`, `X-User-Id`, `X-Organization-Id`, `X-Role` or `X-Public-Id` on this path; the filter returns 403.
+- `PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL=<carelog_private_origin>`. Auth: `X-Service-Id: platform-identity` and `X-Service-Secret: <value of CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET>`.
 
-Core reaches Carelog by Cloud Map name `dev-carelog.<namespace_name>` on port 8080 over HTTP inside the VPC, matching Gateway-to-Core today. Set `core_security_group_id` to Core's service security group ID to add the ingress rule.
+Cloud Map gives plain HTTP inside the VPC, matching Gateway-to-Core today.
 
-- `PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL=http://dev-carelog.<namespace_name>:8080/api/v1`
-  Auth: `Authorization: Bearer <same value as CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET>`. Do not send `X-Service-Id`, `X-Service-Secret`, `X-Gateway-Secret`, `X-User-Id`, `X-Organization-Id`, `X-Role` or `X-Public-Id` on this path; the filter returns 403.
-- `PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL=http://dev-carelog.<namespace_name>:8080/api/v1`
-  Auth: `X-Service-Id: platform-identity` and `X-Service-Secret: <same value as CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET>`.
-- Verify path composition in the Core client (whether it appends `/api/v1` itself) before use. The context path is `/api/v1`.
+### /run/rds-ca.pem
+
+`/run/rds-ca.pem` is hardcoded by `application-prod.yml` (`sslrootcert`). Platform cannot supply it without a runtime fetch or an init container. **Required carelog-be change (not made here):** in `carelog-be/Dockerfile` runtime stage, before `USER 10001:10001`, copy a pinned AWS RDS CA bundle to `/run/rds-ca.pem` (for example `COPY --chmod=0444 certs/rds-ca.pem /run/rds-ca.pem`, read-only, public, reviewed). Also `RUN mkdir -p /run/secrets`. Until that lands, DEV boot fails with `sslrootcert` missing and this root cannot fix it.
 
 ### Open items
 
