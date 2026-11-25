@@ -129,20 +129,41 @@ gateway_jar="$(find_boot_jar "$platform_source/gateway-app/build/libs")"
 finance_jar="$(find_boot_jar "$finance_source/build/libs")"
 
 # Process-aware readiness: fails fast when the process exits instead of waiting for the full window.
-# Optional budget (seconds, 0 = none) and log file. With a log, repeated Redis failures fail the wait early.
+# Sets the global wait_reason to one of: ready | process-exited | budget-exhausted | early-fail-redis | timed-out.
+# Optional budget (seconds, 0 = none) and log file. With a log, repeated Redis health-check WARNs fail the wait early
+# (what is counted, and from when, is defined at redis_repeat_failure).
+wait_reason=""
 wait_ready() {
   local pid="$1" url="$2" label="$3" budget="${4:-0}" log="${5:-}" started=$SECONDS
+  local window_line=-1 started_line=""
+  wait_reason=timed-out
   for _ in $(seq 1 150); do
-    if curl --fail --silent --max-time 5 --output /dev/null "$url"; then return 0; fi
+    if curl --fail --silent --max-time 5 --output /dev/null "$url"; then wait_reason=ready; return 0; fi
     if ! kill -0 "$pid" 2>/dev/null; then
+      wait_reason=process-exited
       printf '%s process exited before readiness.\n' "$label" >&2
       return 1
     fi
-    if [[ -n "$log" ]] && redis_repeat_failure "$log"; then
-      printf '%s early-fail: repeated Redis timeout/connection errors in probe log.\n' "$label" >&2
-      return 1
+    if [[ -n "$log" ]]; then
+      # Open the Redis counting window once: at the "Started" line (its own line number, so lines already written after
+      # it still count) or, if the app has not logged Started by redis_window_seconds, at the current end of the log.
+      if (( window_line < 0 )); then
+        started_line="$(log_started_line "$log")"
+        if [[ -n "$started_line" ]]; then
+          window_line="$started_line"
+        elif (( SECONDS - started >= redis_window_seconds )); then
+          window_line=0
+          if [[ -f "$log" ]]; then window_line="$(wc -l <"$log")"; fi
+        fi
+      fi
+      if (( window_line >= 0 )) && redis_repeat_failure "$log" "$window_line"; then
+        wait_reason=early-fail-redis
+        printf '%s early-fail: repeated Redis health-check WARNs in probe log.\n' "$label" >&2
+        return 1
+      fi
     fi
     if (( budget > 0 && SECONDS - started >= budget )); then
+      wait_reason=budget-exhausted
       printf '%s readiness budget (%ss) exhausted.\n' "$label" "$budget" >&2
       return 1
     fi
@@ -158,9 +179,11 @@ gateway_pid=""
 finance_pid=""
 final_level=unset
 probe_pass_level=-1
-probe_budget_exhausted=0
 section1_written=0
 probe_rows=()
+# Per-level probe state, indexed by level: termination reason (wait_ready) and whether a known cause was extracted.
+probe_level_reason=()
+probe_level_known=()
 flyway_line="(not run)"
 
 # Remediation state. Levels are cumulative: 0 none; 1 (a) /run/secrets dir; 2 (b) sslmode=disable;
@@ -250,14 +273,24 @@ assert_flyway_v9() {
 # wins (it names the configtree/startup failure directly). Otherwise the last (deepest) "Caused by:" line matching
 # known root-cause patterns; if none, the first ERROR line. Output is redacted, CR-stripped and cut to 240 chars.
 known_cause_pattern='PSQLException|does not support SSL|SSLHandshake|RedisConnectionException|RedisCommandTimeoutException|Config data resource .* does not exist|Connection refused'
-redis_failure_pattern='RedisCommandTimeoutException|RedisConnectionException'
-# Repeated Redis failures = 3+ non-stack-frame lines naming them (one exception can yield 2 header lines, so this
-# is a conservative threshold, not an exact attempt count).
+unknown_cause_text='원인 미상 (알려진 원인 패턴과 ERROR 라인 없음)'
+# Redis early-fail counts EVENTS, not Caused-by lines. One event = one WARN line logged by RedisReactiveHealthIndicator
+# ("Redis health check failed"), i.e. one failed health check. Counted only in the window that opens at the earlier of:
+#   (a) the app's "Started <Main> in N seconds" line, or (b) 20s after wait_ready starts (carelog is launched right
+#       before it). WARN lines before the window opens are ignored. Threshold: 4 events => early-fail.
+redis_failure_pattern=' WARN .*(RedisReactiveHealthIndicator|Redis health check failed)'
+redis_event_threshold=4
+redis_window_seconds=20
+# log_started_line <log>: line number of the Spring "Started <Main> in N seconds" line, empty if not logged yet.
+log_started_line() {
+  grep -nE ' Started [^ ]+ in [0-9.]+ seconds' "$1" 2>/dev/null | head -n 1 | cut -d: -f1 || true
+}
+# redis_repeat_failure <log> <window_start_line>: true when WARN events after line <window_start_line> reach the threshold.
 redis_repeat_failure() {
-  local log="$1" n
+  local log="$1" from="$2" n
   [[ -f "$log" ]] || return 1
-  n="$(grep -E "$redis_failure_pattern" "$log" 2>/dev/null | grep -vcE '^[[:space:]]+at ' || true)"
-  (( ${n:-0} >= 3 ))
+  n="$(tail -n +"$((from + 1))" "$log" | grep -Ec "$redis_failure_pattern" || true)"
+  (( ${n:-0} >= redis_event_threshold ))
 }
 extract_cause() {
   local log="$1" cause=""
@@ -272,7 +305,7 @@ extract_cause() {
       cause="$(grep -E ' ERROR ' "$log" | head -n 1 || true)"
     fi
   fi
-  cause="${cause:-원인 미상 (알려진 원인 패턴과 ERROR 라인 없음)}"
+  cause="${cause:-$unknown_cause_text}"
   printf '%s' "$cause" | redact | tr -d '\r' | cut -c1-240
 }
 # print_failure_block: the Spring Boot Description/Action block (masked) into the step log.
@@ -295,6 +328,18 @@ annotate_warning() {
   printf '::warning title=DEV parity::%s\n' "$message"
 }
 md_cell() { printf '%s' "$1" | sed 's/|/\\|/g'; }
+# reason_label: table cell text for a wait_ready termination reason.
+reason_label() {
+  case "$1" in
+    ready) printf 'PASS' ;;
+    process-exited) printf 'FAIL(프로세스 종료)' ;;
+    budget-exhausted) printf 'FAIL(예산 소진)' ;;
+    early-fail-redis) printf 'FAIL(early-fail)' ;;
+    timed-out) printf 'FAIL(시간 초과)' ;;
+    skipped-cap) printf '미실행(전체 상한)' ;;
+    *) printf 'FAIL(미확인)' ;;
+  esac
+}
 
 # Summary sections. Each is written once.
 write_probe_section() {
@@ -305,15 +350,29 @@ write_probe_section() {
     note 'probe 결과: **미실행**. 선행 Flyway 부팅 단계에서 중단됨.'
   elif (( probe_pass_level == 0 )); then
     note 'DEV 설정 그대로(기준선): **PASS**. 보정 없이 readiness UP (prod profile 확인).'
-  elif (( probe_pass_level > 0 )); then
-    note "DEV 설정 그대로(기준선): **FAIL** — ${probe_pass_level}단계 누적 보정 후 기동. DEV 정합성 FINDING이며 job 실패 사유가 아님. 최종 판정은 아래 E2E 섹션."
-  elif (( probe_budget_exhausted )); then
-    note 'DEV 설정 그대로(기준선): **미판정**. 전체 probe 예산(6분) 소진으로 일부 단계가 실행되지 않음. 실행된 단계의 FAIL만 DEV 정합성 FINDING이며 job 실패 사유가 아님.'
   else
-    note 'DEV 설정 그대로(기준선): **FAIL**. 보정 (a)(b)(c)를 누적 적용해도 DEV 설정 기동이 실패함. DEV 정합성 FINDING이며 job 실패 사유가 아님. 최종 판정은 아래 E2E 섹션.'
+    # Verdict word comes from the baseline (level 0) termination reason only. "DEV 결함 의심" is reserved for a
+    # process exit or a Redis early-fail with an extracted cause; a budget cut or unknown cause is a hold, not a finding.
+    local base_reason="${probe_level_reason[0]:-not-run}" base_label verdict
+    base_label="$(reason_label "$base_reason")"
+    case "$base_reason" in
+      process-exited) verdict='DEV 결함 의심' ;;
+      early-fail-redis)
+        if (( ${probe_level_known[0]:-0} )); then verdict='DEV 결함 의심'; else verdict='판정 보류(early-fail, 원인 미상)'; fi ;;
+      budget-exhausted) verdict='판정 보류(예산 소진)' ;;
+      timed-out) verdict='판정 보류(시간 초과)' ;;
+      skipped-cap) verdict='판정 보류(전체 상한으로 미실행)' ;;
+      *) verdict='판정 보류(미실행)' ;;
+    esac
+    if (( probe_pass_level > 0 )); then
+      note "DEV 설정 그대로(기준선): **${base_label}** — ${verdict}. ${probe_pass_level}단계 누적 보정 후 기동. 최종 판정은 아래 E2E 섹션."
+    else
+      note "DEV 설정 그대로(기준선): **${base_label}** — ${verdict}. 최종 판정은 아래 E2E 섹션."
+      if [[ "$verdict" = 'DEV 결함 의심' ]]; then note '보정 (a)(b)(c)를 누적 적용해도 DEV 설정 기동이 실패함 (단계별 원인은 표 참고).'; fi
+    fi
   fi
   if (( ${#probe_rows[@]} > 0 )); then
-    note "probe 예산: 단계당 ${probe_level_budget}초 readiness, probe 단계 전체 ${probe_phase_budget}초. 3회 이상 반복된 Redis 타임아웃/연결 오류는 즉시 FAIL 처리함."
+    note "probe 예산: 단계당 ${probe_level_budget}초 readiness, probe 단계 전체 ${probe_phase_budget}초, 단계 시작 시 잔여가 ${probe_min_level}초 미만이면 미실행(전체 상한). Redis health-check WARN 4회 이상(기동 후 집계 창 내)이면 early-fail."
     note '결론은 순서 의존적이다: 앞 단계의 실패가 뒤 단계의 원인을 가릴 수 있으므로, 표의 원인은 독립된 원인 목록이 아니다.'
     note '(a) /run/secrets는 DEV에도 적용될 수 있음 (application-prod.yml:3 configtree에 `optional:` 없음; DEV ECS task는 정적 근거상 파일을 제공하지 않음). CI 전용 차이인지 DEV 결함인지 판단 불가, DEV Task 조회 필요.'
     if (( run_secrets_preexisted )); then
@@ -424,16 +483,20 @@ probe_labels=(
   '(c) VALKEY_TLS_ENABLED=false (DEV 기본 true; CI Valkey는 평문)'
 )
 # Probe budgets: each level gets its own readiness window; the whole phase is capped so a slow DEV-parity run cannot
-# stall the job. A level cut by the phase cap is reported as 미실행, not as a finding.
+# stall the job. A level is not started when the remaining phase time is under probe_min_level (a truncated probe
+# proves nothing; ~3x the observed healthy boot of 15s). Such a level is reported as 미실행(전체 상한), not a finding.
 probe_level_budget=90
 probe_phase_budget=360
+probe_min_level=45
 probe_phase_start=$SECONDS
-probe_budget_exhausted=0
 for level in 0 1 2 3; do
   remaining=$(( probe_phase_budget - (SECONDS - probe_phase_start) ))
-  if (( remaining <= 0 )); then
-    probe_budget_exhausted=1
-    probe_rows+=("| $level | ${probe_labels[$level]} | 미실행 | 전체 probe 예산(${probe_phase_budget}초) 소진으로 실행하지 않음 | — |")
+  if (( remaining < probe_min_level )); then
+    probe_level_reason[level]=skipped-cap
+    probe_level_known[level]=0
+    shown_remaining=$(( remaining > 0 ? remaining : 0 ))
+    probe_rows+=("| $level | ${probe_labels[$level]} | 미실행(전체 상한) | 잔여 probe 예산 ${shown_remaining}초 < 단계 최소 ${probe_min_level}초라 실행하지 않음 | — |")
+    annotate_warning "[L$level] ${probe_labels[$level]}: 미실행(전체 상한)"
     break
   fi
   level_budget=$(( remaining < probe_level_budget ? remaining : probe_level_budget ))
@@ -442,15 +505,14 @@ for level in 0 1 2 3; do
   level_started=$SECONDS
   start_carelog "probe-L$level" false "$carelog_probe_access_dir" "$valkey_tls"
   probe_pid="$carelog_pid"
-  probe_result=FAIL
-  if wait_ready "$probe_pid" "$carelog_ready_url" "carelog-be DEV probe L$level" "$level_budget" "$probe_log"; then
-    probe_result=PASS
-  fi
+  wait_ready "$probe_pid" "$carelog_ready_url" "carelog-be DEV probe L$level" "$level_budget" "$probe_log" || true
+  reason="$wait_reason"
   kill "$probe_pid" 2>/dev/null || true
   wait "$probe_pid" 2>/dev/null || true
   level_elapsed="$(( SECONDS - level_started ))초"
+  probe_level_reason[level]="$reason"
 
-  if [[ "$probe_result" = PASS ]]; then
+  if [[ "$reason" = ready ]]; then
     if ! assert_profile_prod "$probe_log"; then
       fail_e2e 'L1 assertion failed: DEV-parity probe active profile is not prod.'
     fi
@@ -459,8 +521,11 @@ for level in 0 1 2 3; do
     break
   fi
   cause="$(extract_cause "$probe_log")"
-  probe_rows+=("| $level | ${probe_labels[$level]} | FAIL | $(md_cell "$cause") | $level_elapsed |")
-  annotate_warning "[L$level] ${probe_labels[$level]}: $cause"
+  probe_level_known[level]=0
+  if [[ "$cause" != "$unknown_cause_text" ]]; then probe_level_known[level]=1; fi
+  label="$(reason_label "$reason")"
+  probe_rows+=("| $level | ${probe_labels[$level]} | $label | $(md_cell "$cause") | $level_elapsed |")
+  annotate_warning "[L$level] ${probe_labels[$level]}: $label — $cause"
   print_failure_block "$probe_log"
 done
 
