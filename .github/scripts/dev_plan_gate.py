@@ -6,15 +6,17 @@ Port of the OFF gate in dev-plan-runbook.ps1. Prints resource addresses
 Attribute values are compared in memory and never printed.
 
 Raw init/plan logs are read here only to detect undeclared variables and
-AccessDenied lines. From those lines only the denied action name and the AWS
-service prefix are printed; ARNs, account ids and resource names are not.
+AccessDenied lines. From those lines only the denied action name, the AWS
+service prefix and a fixed hint are printed; ARNs, account ids and resource
+names are not.
 
 Exit codes:
-  0  summary written, gate passed (or report mode)
-  2  OFF gate failed, or plan missing / did not complete
+  0  summary written, gate passed (or report mode, or skip in report mode)
+  2  OFF gate failed, or plan missing / did not complete / skipped in OFF mode
   3  input error (bad JSON, unexpected Terraform version, unknown skip code)
 
-Run with `python3 -I` from the trusted checkout (main), never from the candidate tree.
+Run with `env -i PATH=/usr/bin:/bin /usr/bin/python3 -I` from the trusted
+checkout (main), never from the candidate tree.
 """
 import argparse
 import json
@@ -23,6 +25,11 @@ import re
 import sys
 
 EXPECTED_TERRAFORM = "1.10.5"
+
+# Only the non-indexed baseline task definition may be replaced. Its replacement
+# is allowed without a content check: skip_destroy keeps the old revision, and
+# the ECS service update that would point at the new revision is an "update" row
+# on aws_ecs_service, which fails the gate. Indexed task definitions do not match.
 TASKDEF_RE = re.compile(r"\.aws_ecs_task_definition\.baseline$")
 SENSITIVE_RE = re.compile(r"environment|secret|policy|container_definitions|password|token|key", re.I)
 INDEX_RE = re.compile(r"\[[^\]]*\]")
@@ -34,6 +41,7 @@ DENIED_SERVICE_RE = re.compile(r"on resource:\s*\"?arn:[a-z-]+:([a-z0-9-]+):")
 SKIP_REASONS = {
     "missing-secret-key": "preserve secret has no object for this root",
     "input-invalid": "preserve input or root layout is invalid",
+    "scan-failed": "candidate failed the pre-init trust scan (see scan section)",
     "init-failed": "terraform init failed",
     "plan-failed": "terraform plan or show failed",
 }
@@ -77,6 +85,7 @@ def build_rows(plan):
                 counts["no-op"] += 1
             continue
 
+        # A move that also changes attributes is kind "update" and is a violation.
         kind = "replace" if joined == "create,delete" else joined
         if kind in counts:
             counts[kind] += 1
@@ -92,30 +101,43 @@ def build_rows(plan):
 
 
 def off_gate_violations(rows):
+    """Everything except no-op/moved rows and the baseline task-definition replace fails."""
     bad = []
     for r in rows:
         if r["kind"] == "moved":
             continue
-        if r["kind"] == "replace" and TASKDEF_RE.search(r.get("raw_address", r["address"])):
+        if r["kind"] == "replace" and TASKDEF_RE.search(r.get("raw_address", "")):
             continue
         bad.append(f"{r['joined']} {r['address']}")
     return bad
 
 
+def _hint(service, line):
+    low = line.lower()
+    if "unauthorizedoperation" in low:
+        return "EC2 describe/read permission on the plan role"
+    if service == "s3" or "bucket" in low or "state" in low:
+        return "state backend: GetObject on state key, Get/Put/Delete on the lock key only"
+    if service == "unknown" and "accessdenied" in low:
+        return "generic access denied: identify the service in the AWS error before granting"
+    return "grant the listed action to the plan role"
+
+
 def access_denied_items(log_paths):
-    """Return sorted (action, service) pairs. Nothing else from the log is kept."""
+    """Return sorted (action, service, hint) tuples. Nothing else from the log is kept."""
     items = set()
     for path in log_paths:
         if not os.path.isfile(path):
             continue
         with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                if "AccessDenied" not in line and "not authorized to perform" not in line:
+                if "AccessDenied" not in line and "not authorized to perform" not in line \
+                        and "UnauthorizedOperation" not in line:
                     continue
                 action = DENIED_ACTION_RE.search(line)
                 service = DENIED_SERVICE_RE.search(line)
-                items.add((action.group(1) if action else "unparsed",
-                           service.group(1) if service else "unknown"))
+                svc = service.group(1) if service else "unknown"
+                items.add((action.group(1) if action else "unparsed", svc, _hint(svc, line)))
     return sorted(items)[:20]
 
 
@@ -150,10 +172,10 @@ def render_skip(root, mode, code, log_paths):
     out = [f"### {root} ({mode})", ""]
     out.append(f"- Skipped (`{code}`): {SKIP_REASONS[code]}. Raw log is local only.")
     denied = access_denied_items(log_paths)
-    for action, service in denied:
-        out.append(f"- AccessDenied: plan role needs `{action}` (resource service `{service}`)")
+    for action, service, hint in denied:
+        out.append(f"- AccessDenied: plan role needs `{action}` (resource service `{service}`). Hint: {hint}.")
     if denied:
-        out.append("- Grant the plan role the listed actions, then re-run. Resource names are omitted.")
+        out.append("- Resource names and ARNs are omitted.")
     out.append("")
     return "\n".join(out) + "\n"
 

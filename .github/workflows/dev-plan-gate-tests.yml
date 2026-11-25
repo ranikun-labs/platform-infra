@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - '.github/scripts/dev_plan_gate.py'
+      - '.github/scripts/dev_candidate_scan.py'
       - '.github/scripts/tests/**'
       - '.github/workflows/dev-signup-off-plan.yml'
       - '.github/workflows/dev-plan-gate-tests.yml'

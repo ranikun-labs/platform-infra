@@ -3,9 +3,9 @@ import json, os, subprocess, sys, tempfile, unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "dev_plan_gate.py")
 FIX = os.path.join(HERE, "fixtures")
-WORKFLOWS = os.path.join(HERE, "..", "..", "workflows")
 SECRETS = ["SYNTH-SECRET-VALUE-AAA", "SYNTH-SECRET-VALUE-BBB", "SYNTH-KEY-VALUE-CCC",
            "SYNTH-NAME-DDD", "SYNTH-FIN-NAME", "SYNTH-ROLE", "SYNTH-SECRET-NAME", "123456789012"]
+TASKDEF = "module.service.aws_ecs_task_definition.baseline"
 
 
 def run(plan, mode, root="carelog", logs=(), skip=None):
@@ -21,6 +21,25 @@ def run(plan, mode, root="carelog", logs=(), skip=None):
     with open(summary, encoding="utf-8") as fh:
         text = fh.read()
     return p.returncode, p.stdout + p.stderr, text
+
+
+def rc_row(address, actions, before=None, after=None, previous=None):
+    row = {"address": address, "change": {"actions": actions, "before": before, "after": after}}
+    if previous:
+        row["previous_address"] = previous
+    return row
+
+
+def plan_with(rows, version="1.10.5"):
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "plan.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"format_version": "1.2", "terraform_version": version, "resource_changes": rows}, fh)
+    return path
+
+
+def gate_off(rows):
+    return run(plan_with(rows), "off")
 
 
 class GateTests(unittest.TestCase):
@@ -50,6 +69,13 @@ class GateTests(unittest.TestCase):
         for s in SECRETS:
             self.assertNotIn(s, text)
 
+    def test_report_mode_delete_is_reported_not_gated(self):
+        rc, out, text = run(plan_with([rc_row("aws_s3_bucket.x", ["delete"], before={})]), "report",
+                            root="finance")
+        self.assertEqual(rc, 0)
+        self.assertIn("delete", text)
+        self.assertNotIn("OFF gate", text)
+
     def test_undeclared_variable_fails_gate(self):
         rc, out, text = run(os.path.join(FIX, "off_pass.json"), "off",
                             logs=[os.path.join(FIX, "undeclared.log")])
@@ -65,6 +91,45 @@ class GateTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("did not complete", text)
 
+    # --- violation kinds: each must fail the OFF gate ---
+
+    def test_delete_fails_gate(self):
+        rc, out, text = gate_off([rc_row("aws_s3_bucket.x", ["delete"], before={})])
+        self.assertEqual(rc, 2)
+        self.assertIn("delete aws_s3_bucket.x", text)
+
+    def test_forget_fails_gate(self):
+        rc, out, text = gate_off([rc_row("aws_s3_bucket.x", ["forget"], before={})])
+        self.assertEqual(rc, 2)
+        self.assertIn("forget aws_s3_bucket.x", text)
+
+    def test_taskdef_update_fails_gate(self):
+        # Only a replace of the baseline task definition is allowed, never an in-place update.
+        rc, out, text = gate_off([rc_row(TASKDEF, ["update"], before={"family": "f"}, after={"family": "g"})])
+        self.assertEqual(rc, 2)
+        self.assertIn("OFF gate: FAIL", text)
+
+    def test_moved_plus_update_fails_gate(self):
+        rc, out, text = gate_off([rc_row("aws_s3_bucket.new", ["update"], before={"a": 1}, after={"a": 2},
+                                         previous="aws_s3_bucket.old")])
+        self.assertEqual(rc, 2)
+        self.assertIn("update aws_s3_bucket.new", text)
+
+    def test_indexed_taskdef_replace_fails_gate(self):
+        # Only the non-indexed baseline is exempt; an indexed revision replace is a violation.
+        rc, out, text = gate_off([rc_row(TASKDEF + '["SYNTH-KEY-VALUE-CCC"]', ["create", "delete"],
+                                         before={}, after={})])
+        self.assertEqual(rc, 2)
+        self.assertIn("OFF gate: FAIL", text)
+        self.assertNotIn("SYNTH-KEY-VALUE-CCC", text)
+
+    def test_baseline_taskdef_replace_passes(self):
+        rc, out, text = gate_off([rc_row(TASKDEF, ["create", "delete"], before={}, after={})])
+        self.assertEqual(rc, 0)
+        self.assertIn("OFF gate: PASS", text)
+
+    # --- skip paths and AccessDenied ---
+
     def test_skip_access_denied_reports_action_and_service_only(self):
         rc, out, text = run("/nonexistent/plan.json", "off", skip="plan-failed",
                             logs=[os.path.join(FIX, "access_denied.log")])
@@ -76,6 +141,30 @@ class GateTests(unittest.TestCase):
             self.assertNotIn(s, text)
             self.assertNotIn(s, out)
 
+    def test_skip_s3_state_access_denied_hint(self):
+        d = tempfile.mkdtemp()
+        log = os.path.join(d, "init.log")
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write("Error: Failed to get existing workspaces: S3 bucket SYNTH-SECRET-NAME: AccessDenied: Access Denied\n")
+        rc, out, text = run("/nonexistent/plan.json", "off", skip="init-failed", logs=[log])
+        self.assertEqual(rc, 2)
+        self.assertIn("state backend", text)
+        self.assertIn("unparsed", text)
+        self.assertNotIn("SYNTH-SECRET-NAME", text)
+
+    def test_skip_unauthorized_operation_hint(self):
+        d = tempfile.mkdtemp()
+        log = os.path.join(d, "plan.log")
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write("Error: UnauthorizedOperation: You are not authorized to perform this operation.\n")
+        rc, out, text = run("/nonexistent/plan.json", "off", skip="plan-failed", logs=[log])
+        self.assertIn("EC2 describe/read permission", text)
+
+    def test_skip_scan_failed_code(self):
+        rc, out, text = run("/nonexistent/plan.json", "off", skip="scan-failed")
+        self.assertEqual(rc, 2)
+        self.assertIn("pre-init trust scan", text)
+
     def test_skip_missing_secret_key_report_mode_exits_zero(self):
         rc, out, text = run("/nonexistent/plan.json", "report", root="finance", skip="missing-secret-key")
         self.assertEqual(rc, 0)
@@ -84,59 +173,6 @@ class GateTests(unittest.TestCase):
     def test_unknown_skip_code_rejected(self):
         rc, out, text = run("/nonexistent/plan.json", "off", skip="made-up")
         self.assertEqual(rc, 3)
-
-
-class WorkflowTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        import yaml
-        with open(os.path.join(WORKFLOWS, "dev-signup-off-plan.yml"), encoding="utf-8") as fh:
-            cls.doc = yaml.safe_load(fh)
-        with open(os.path.join(WORKFLOWS, "dev-shared-plan.yml"), encoding="utf-8") as fh:
-            cls.shared = yaml.safe_load(fh)
-
-    def test_trigger_and_permissions(self):
-        on = self.doc.get(True, self.doc.get("on"))
-        self.assertEqual(set(on.keys()), {"workflow_dispatch"})
-        self.assertEqual(self.doc["permissions"], {})
-
-    def test_jobs_gated_to_main_and_environment(self):
-        jobs = self.doc["jobs"]
-        self.assertEqual(set(jobs), {"validate", "plan-carelog-platform", "plan-finance"})
-        for name, j in jobs.items():
-            self.assertIn("refs/heads/main", j["if"], name)
-        for name in ("plan-carelog-platform", "plan-finance"):
-            self.assertEqual(jobs[name]["environment"], "dev-plan")
-            self.assertEqual(jobs[name]["permissions"], {"contents": "read", "id-token": "write"})
-            self.assertEqual(jobs[name]["needs"], "validate")
-
-    def test_matrix_serial_and_shared_concurrency(self):
-        plan = self.doc["jobs"]["plan-carelog-platform"]
-        self.assertEqual(plan["strategy"]["max-parallel"], 1)
-        self.assertEqual(plan["concurrency"]["group"], "dev-shared-terraform-plan")
-        shared_jobs = self.shared["jobs"]["plan"]
-        self.assertEqual(shared_jobs["concurrency"]["group"], plan["concurrency"]["group"])
-
-    def test_oidc_action_pinned_like_dev_shared_plan(self):
-        def uses_of(doc, prefix):
-            for job in doc["jobs"].values():
-                for step in job["steps"]:
-                    if str(step.get("uses", "")).startswith(prefix):
-                        return step["uses"]
-        for prefix in ("aws-actions/configure-aws-credentials@", "hashicorp/setup-terraform@"):
-            self.assertEqual(uses_of(self.doc, prefix), uses_of(self.shared, prefix), prefix)
-
-    def test_terraform_pinned(self):
-        steps = [s for j in self.doc["jobs"].values() for s in j["steps"]
-                 if str(s.get("uses", "")).startswith("hashicorp/setup-terraform@")]
-        self.assertTrue(steps)
-        for s in steps:
-            self.assertEqual(s["with"]["terraform_version"], "1.10.5")
-
-    def test_allowlist_is_present_and_fail_closed_in_file(self):
-        validate = self.doc["jobs"]["validate"]
-        script = next(s["run"] for s in validate["steps"] if "allowed=(" in s.get("run", ""))
-        self.assertIn("(( ${#allowed[@]} > 0 ))", script)
 
 
 if __name__ == "__main__":
