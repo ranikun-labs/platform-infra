@@ -1,0 +1,5 @@
+{"format_version":"1.2","terraform_version":"1.10.5","resource_changes":[
+ {"address":"module.service.aws_ecs_task_definition.baseline","previous_address":null,"change":{"actions":["create","delete"],"before":{"family":"fam"},"after":{"family":"fam"}}},
+ {"address":"module.service.aws_ecs_service.service","change":{"actions":["no-op"],"before":{"desired_count":0},"after":{"desired_count":0}}},
+ {"address":"aws_security_group.x","previous_address":"aws_security_group.old","change":{"actions":["no-op"],"before":{},"after":{}}}
+]}

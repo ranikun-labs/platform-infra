@@ -1,0 +1,5 @@
+{"format_version":"1.2","terraform_version":"1.10.5","resource_changes":[
+ {"address":"module.service.aws_ecs_task_definition.baseline","change":{"actions":["create","delete"],"before":{"family":"fam"},"after":{"family":"fam"}}},
+ {"address":"module.core.aws_ecs_service.service","change":{"actions":["update"],"before":{"desired_count":0,"environment":[{"name":"DB","value":"SYNTH-SECRET-VALUE-AAA"}]},"after":{"desired_count":1,"environment":[{"name":"DB","value":"SYNTH-SECRET-VALUE-BBB"}]}}},
+ {"address":"aws_security_group.extra[\"SYNTH-KEY-VALUE-CCC\"]","change":{"actions":["create"],"before":null,"after":{"name":"SYNTH-NAME-DDD"}}}
+]}
