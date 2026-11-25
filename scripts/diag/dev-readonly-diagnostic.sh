@@ -29,12 +29,16 @@ def allowed: test("^(SPRING_PROFILES_ACTIVE"
   + "|PLATFORM_GATEWAY_REDIS_TLS_ENABLED)$");
 def flagname: test("(ENABLED|ENABLE|SIGNUP|DUAL_AUTH|_TLS)$");
 def secretish: test("(^|_)(PASSWORD|PASSWD|SECRET|TOKEN|KEY|CREDENTIALS?|PRIVATE|PASS|JDBC|DSN)(_|$)");
-# URL -> host[:port]. 마지막 '@' 뒤만 취해 userinfo를 버리고, 호스트 문자 집합에 맞지 않으면 <생략>으로 닫는다(fail-closed).
+# URL -> host[:port]. 1) scheme 제거 2) authority만 취함(첫 '/', '?', '#' 앞) 3) 마지막 '@' 뒤만 취함.
+# 호스트 문자 집합 + 포트 1-65535 + (scheme이 있거나 점이 있어야 함)을 만족하지 않으면 <생략>으로 닫는다(fail-closed).
 def hostonly:
-  sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
-  | (if contains("@") then split("@") | last else . end)
-  | sub("[/?#].*$"; "")
-  | if test("^[A-Za-z0-9.-]+(:[0-9]{1,5})?$") then . else "<생략>" end;
+  (test("^[A-Za-z][A-Za-z0-9+.-]*://")) as $sch
+  | (sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "") | capture("^(?<a>[^/?#]*)").a
+     | if contains("@") then split("@") | last else . end) as $h
+  | if ($h | test("^[A-Za-z0-9.-]+(:[0-9]{1,5})?$"))
+       and ((($h | split(":")[1]) // "1") | tonumber | . >= 1 and . <= 65535)
+       and ($sch or ($h | test("\\.")))
+    then $h else "<생략>" end;
 def safe($n; $v):
   if ($v == null) then null
   elif ($n | secretish) then null
@@ -78,6 +82,7 @@ def denied($re): any(.denied[]?; test($re));
 def vals($c; $re): [ $c[] | .env[] | select(.name | test($re)) | "\(.name)=\(.value // "(비공개)")" ];
 def has($c; $re): ([ $c[] | .env[] | select(.name | test($re)) ] | length) > 0;
 def hassec($c; $n): any($c[] | .secrets[]?; .name == $n);
+def hassecany($c; $ns): any($ns[]; . as $n | hassec($c; $n));
 def secs($c; $re): [ $c[] | .secrets[]? | select(.name | test($re)) | .name ];
 # 값 비교는 대소문자 무시. "true"만 참이다.
 def flagtrue($c; $re): any($c[] | .env[] | select(.name | test($re)); ((.value // "") | ascii_downcase) == "true");
@@ -95,7 +100,7 @@ def verdict($label; $c; $ok; $why):
      elif pf($label) then "판정 불가(파싱 실패)"
      elif ff($label) then "판정 불가(조회 실패)"
      else "누락 (\($label) 서비스 미발견)" end)
-  elif $ok then "확인됨"
+  elif $ok then (if (pf($label) or ff($label)) then "판정 불가(일부 서비스 실패)" else "확인됨" end)
   elif ($why | length) > 0 then "누락 (\($why | join(", ")))"
   elif efiles($c) then "부분 확인(environmentFiles 미열람)"
   else "누락" end;
@@ -123,10 +128,10 @@ def row($n; $item; $status; $ev): "| \($n) | \($item) | \($status) | \($ev) |";
           and flagtrue($c; "^PLATFORM_IDENTITY_FINANCE_REFERENCE_ENABLED$")
           and flagtrue($c; "^PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED$")
           and flagtrue($c; "^PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED$")
-          and hassec($c; "PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL")
-          and hassec($c; "PLATFORM_IDENTITY_PRODUCT_CLAIMS_SERVICE_SECRET");
+          and hassecany($c; ["PLATFORM_IDENTITY_CARELOGENROLLMENT_CREDENTIAL", "PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL"])
+          and hassecany($c; ["PLATFORM_IDENTITY_PRODUCT_CLAIMS_SERVICE_SECRET", "PLATFORM_IDENTITY_PRODUCTCLAIMS_SERVICE_SECRET"]);
         (profbad($c) + flagbad($c; "^(PLATFORM_IDENTITY_AUTH_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED)$")));
-      "env: \(vals($c; "^(SPRING_PROFILES_ACTIVE|PLATFORM_IDENTITY_AUTH_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED)$") | join(", ") | orna) · secret: \(secs($c; "^PLATFORM_IDENTITY_(CARELOG_ENROLLMENT_CREDENTIAL|PRODUCT_CLAIMS_SERVICE_SECRET)$") | join(", ") | orna)")),
+      "env: \(vals($c; "^(SPRING_PROFILES_ACTIVE|PLATFORM_IDENTITY_AUTH_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED)$") | join(", ") | orna) · secret: \(secs($c; "^PLATFORM_IDENTITY_(CARELOG_?ENROLLMENT_CREDENTIAL|PRODUCT_?CLAIMS_SERVICE_SECRET)$") | join(", ") | orna) · carelog 형식: \(if hassec($c; "PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL") and (hassec($c; "PLATFORM_IDENTITY_CARELOGENROLLMENT_CREDENTIAL") | not) then "언더스코어형만(Spring relaxed 바인딩 불일치 가능)" else "canonical" end)")),
 (cs("gateway") as $g
   | row(4; "Gateway Finance 라우팅 (PLATFORM_GATEWAY_FINANCE_BE_URI·REFERENCE/TRUSTED_CONTEXT 플래그·trusted-context secret)";
       verdict("gateway"; $g;
@@ -147,12 +152,15 @@ def row($n; $item; $status; $ev): "| \($n) | \($item) | \($status) | \($ev) |";
   | (.elasticache // []) as $ec
   | [ $ec[] | select(.kind == "replication-group") ] as $rg
   | [ $ec[] | select(.kind == "serverless") ] as $sl
-  | ((any($rg[]; .transit_encryption == true and .mode == "required")) or (($sl | length) > 0)) as $transit
-  | ($transit and flagtrue($c; "^VALKEY_TLS_ENABLED$") and (flagtrue($k; "^PLATFORM_IDENTITY_REDIS_TLS_ENABLED$") or flagtrue($g; "^PLATFORM_GATEWAY_REDIS_TLS_ENABLED$"))) as $ok
   | ([ $rg[] | select(.transit_encryption != true or .mode != "required") | "TransitEncryption=\(.transit_encryption | tostring)/Mode=\(.mode // "미확인")" ]
      + flagbad($c; "^VALKEY_TLS_ENABLED$") + flagbad($k; "^PLATFORM_IDENTITY_REDIS_TLS_ENABLED$") + flagbad($g; "^PLATFORM_GATEWAY_REDIS_TLS_ENABLED$")) as $why
+  # dev RG가 있으면 전부 required여야 한다. 없을 때만 serverless(TLS 전용)로 대체한다.
+  | (if ($rg | length) > 0 then ($rg | all(.transit_encryption == true and .mode == "required")) else (($sl | length) > 0) end) as $transit
+  | ($transit and ($why | length) == 0 and flagtrue($c; "^VALKEY_TLS_ENABLED$") and (flagtrue($k; "^PLATFORM_IDENTITY_REDIS_TLS_ENABLED$") or flagtrue($g; "^PLATFORM_GATEWAY_REDIS_TLS_ENABLED$"))) as $ok
+  | ((pf("carelog") or ff("carelog") or pf("core") or ff("core") or pf("gateway") or ff("gateway"))) as $pfail
   | row(6; "Valkey TLS: 전송 암호화 required + 앱 TLS 플래그 (VALKEY_TLS / PLATFORM_IDENTITY·GATEWAY_REDIS_TLS)";
       (if denied("^elasticache:DescribeReplicationGroups") then "권한 부족"
+       elif $pfail then "판정 불가(일부 서비스 실패)"
        elif ($rg | length) == 0 and ($sl | length) == 0 then (if denied("^elasticache:DescribeServerlessCaches") then "권한 부족" else "누락 (replication group 미발견)" end)
        elif $ok then "확인됨" + (if ($rg | length) == 0 then " (serverless: TLS 전용 설계, 값 미열람)" else "" end)
        elif ($why | length) > 0 then "누락 (\($why | join(", ")))"
@@ -342,14 +350,19 @@ JSON
   expect_host() { local got; got=$(hostval "$1"); [[ $got == "$2" ]] || fail "hostonly: input=[$1] got=[$got] want=[$2]"; }
   expect_host 'https://user:SEC1@SEC2@host.example:8443/x?y=SEC3' 'host.example:8443'
   expect_host 'https://user:SEC1@SEC2@host' 'host'
-  expect_host 'https://user:SEC1/SEC2@host.example' 'host.example'
-  expect_host 'user:SEC1#SEC2@h' 'h'
+  expect_host 'https://user:SEC1/SEC2@host.example' '<생략>'
+  expect_host 'user:SEC1#SEC2@h' '<생략>'
   expect_host 'jdbc:sqlserver://db:1433;user=sa;password=SEC1' '<생략>'
-  expect_host 'redis://default:SEC1?x=SEC2@h' 'h'
+  expect_host 'redis://default:SEC1?x=SEC2@h' '<생략>'
   expect_host 'h.example:443 SEC1' '<생략>'
   expect_host 'https://user:SEC1@' '<생략>'
   expect_host 'jdbc:postgresql://db.internal:5432/carelog?password=SEC1' '<생략>'
   expect_host 'https://db.example:8443/x' 'db.example:8443'
+  expect_host 'https://h/p?x=a@TOKEN' 'h'
+  expect_host 'LEAKonlyword' '<생략>'
+  expect_host 'host:99999' '<생략>'
+  expect_host 'https://host:99999' '<생략>'
+  expect_host 'https://host:0' '<생략>'
 
   # 4) 레거시 이름은 실제 바인딩이 아니므로 존재로 치지 않는다 (alias 없음).
   td='{"family":"f","revision":1,"containerDefinitions":[{"name":"gw","image":"i","environment":[{"name":"FINANCE_BE_URI","value":"https://legacy.example:8080"},{"name":"FINANCE_REFERENCE_ENABLED","value":"true"},{"name":"REDIS_TLS_ENABLED","value":"true"}],"secrets":[{"name":"PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_SERVICE_SECRET","valueFrom":"arn:aws:secretsmanager:ap-northeast-2:1:secret:dev/gw/trust"}]}]}'
@@ -380,7 +393,7 @@ JSON
   {"cluster":"dev-shared","service":"dev-core","taskdef":{"containers":[
     {"name":"core","env_files":0,
      "env":[{"name":"SPRING_PROFILES_ACTIVE","value":"dev"},{"name":"PLATFORM_IDENTITY_AUTH_ENABLED","value":"true"},{"name":"PLATFORM_IDENTITY_FINANCE_REFERENCE_ENABLED","value":"true"},{"name":"PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED","value":"true"},{"name":"PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED","value":"true"},{"name":"PLATFORM_IDENTITY_REDIS_TLS_ENABLED","value":"true"}],
-     "secrets":[{"name":"PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL","ref":"x"},{"name":"PLATFORM_IDENTITY_PRODUCT_CLAIMS_SERVICE_SECRET","ref":"y"}],
+     "secrets":[{"name":"PLATFORM_IDENTITY_CARELOGENROLLMENT_CREDENTIAL","ref":"x"},{"name":"PLATFORM_IDENTITY_PRODUCT_CLAIMS_SERVICE_SECRET","ref":"y"}],
      "mounts":[],"hints":{}}]}},
   {"cluster":"dev-shared","service":"dev-gateway","taskdef":{"containers":[
     {"name":"gw","env_files":0,
@@ -404,6 +417,10 @@ JSON
   # 실제 이름의 플래그 false -> 누락 + 값=false
   mut core-auth-false '.services[1].taskdef.containers[0].env |= map(if .name == "PLATFORM_IDENTITY_AUTH_ENABLED" then .value = "false" else . end)' 3 '누락 (PLATFORM_IDENTITY_AUTH_ENABLED 값=false)'
   mut core-signup-false '.services[1].taskdef.containers[0].env |= map(if .name == "PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED" then .value = "false" else . end)' 3 '누락 (PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED 값=false)'
+  mut core-carelog-underscored '.services[1].taskdef.containers[0].secrets |= map(if .name == "PLATFORM_IDENTITY_CARELOGENROLLMENT_CREDENTIAL" then .name = "PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL" else . end)' 3 '| 확인됨 |'
+  mut core-carelog-missing '.services[1].taskdef.containers[0].secrets |= map(select(.name != "PLATFORM_IDENTITY_CARELOGENROLLMENT_CREDENTIAL"))' 3 '| 누락 |'
+  mut core-product-compact '.services[1].taskdef.containers[0].secrets |= map(if .name == "PLATFORM_IDENTITY_PRODUCT_CLAIMS_SERVICE_SECRET" then .name = "PLATFORM_IDENTITY_PRODUCTCLAIMS_SERVICE_SECRET" else . end)' 3 '| 확인됨 |'
+  mut core-product-missing '.services[1].taskdef.containers[0].secrets |= map(select(.name != "PLATFORM_IDENTITY_PRODUCT_CLAIMS_SERVICE_SECRET"))' 3 '| 누락 |'
   mut core-devdual-false '.services[1].taskdef.containers[0].env |= map(if .name == "PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED" then .value = "false" else . end)' 3 '누락 (PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED 값=false)'
   mut gw-reference-false '.services[2].taskdef.containers[0].env |= map(if .name == "PLATFORM_GATEWAY_FINANCE_REFERENCE_ENABLED" then .value = "false" else . end)' 4 '누락 (PLATFORM_GATEWAY_FINANCE_REFERENCE_ENABLED 값=false)'
   mut gw-reference-upper-true '.services[2].taskdef.containers[0].env |= map(if .name == "PLATFORM_GATEWAY_FINANCE_REFERENCE_ENABLED" then .value = "TRUE" else . end)' 4 '| 확인됨 |'
@@ -420,6 +437,12 @@ JSON
   # 항목 6: Valkey transit은 required만 인정, preferred는 누락, serverless는 확인됨(주석), RG 권한 거부는 serverless와 무관하게 권한 부족
   mut valkey-preferred '.elasticache[0].mode = "preferred"' 6 'Mode=preferred'
   mut valkey-serverless '.elasticache = [{kind:"serverless", id:"dev-v", transit_encryption:true, mode:"serverless-tls", status:"available"}]' 6 '확인됨 (serverless'
+  mut valkey-mixed-serverless '.elasticache = [{kind:"replication-group", id:"a", transit_encryption:true, mode:"required"}, {kind:"replication-group", id:"b", transit_encryption:true, mode:"preferred"}, {kind:"serverless", id:"dev-v", transit_encryption:true, mode:"serverless-tls"}]' 6 'Mode=preferred'
+  grep -F '| 6 |' "$mrep" | grep -qF '| 확인됨 |' && fail 'mixed RG (one preferred) with serverless counted as 확인됨'
+  mut valkey-all-required '.elasticache = [{kind:"replication-group", id:"a", transit_encryption:true, mode:"required"}, {kind:"replication-group", id:"b", transit_encryption:true, mode:"required"}]' 6 '| 확인됨 |'
+  mut valkey-partial-fail '.services += [{cluster:"dev-shared", service:"dev-gateway-2", taskdef:null, fetch_failed:true}]' 6 '판정 불가(일부 서비스 실패)'
+  mut core-partial-fail '.services += [{cluster:"dev-shared", service:"dev-core-2", taskdef:null, parse_failed:true}]' 3 '판정 불가(일부 서비스 실패)'
+  mut gateway-partial-fail '.services += [{cluster:"dev-shared", service:"dev-gateway-2", taskdef:null, parse_failed:true}]' 4 '판정 불가(일부 서비스 실패)'
   mut valkey-rg-denied '.denied = ["elasticache:DescribeReplicationGroups on elasticache(*)"] | .elasticache += [{kind:"serverless", id:"dev-v", transit_encryption:true, mode:"serverless-tls", status:"available"}]' 6 '| 권한 부족 |'
   # 항목 8: 파싱/조회 실패는 판정 불가 (누락 아님)
   mut parse-fail '.services[0] = {cluster:"dev-shared", service:"dev-carelog", taskdef:null, parse_failed:true}' 1 '판정 불가(파싱 실패)'
@@ -449,7 +472,7 @@ JSON
     exit 1
   fi
   cat "$rep"
-  echo 'selftest OK: 실제 바인딩 이름 판정, 레거시 이름 비인정, 비밀 미출력, 파싱 실패 처리 확인'
+  echo 'selftest OK: 실제 바인딩 이름·secret 형식·Valkey 전부 required·일부 실패 판정, hostonly, 레거시 비인정, 비밀 미출력 확인'
 }
 
 case ${1:-} in
