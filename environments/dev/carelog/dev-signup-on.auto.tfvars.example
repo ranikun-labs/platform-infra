@@ -1,0 +1,15 @@
+# Overlay: Core enrollment and claims ON (signup path). Use with dev-live-preserve.auto.tfvars, not alone:
+#   terraform plan -var-file=dev-live-preserve.auto.tfvars -var-file=dev-signup-on.auto.tfvars.example
+# Requires the TLS listener (https_enrollment). The Core path is TLS-only on 8443. All ARNs are placeholders.
+
+carelog_core_auth = {
+  enabled                = true
+  valkey_tls_enabled     = true
+  core_security_group_id = "sg-0000000000000000b"
+  https_enrollment = {
+    proxy_image              = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/carelog/tls-proxy@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:123456789012:repository/ranikun/carelog/tls-proxy"
+    server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/enrollment-tls/server-bundle-REPLACE"
+    kms_key_arns             = []
+  }
+}

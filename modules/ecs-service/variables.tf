@@ -116,3 +116,29 @@ variable "app_depends_on" {
   }))
   default = []
 }
+
+# Preservation inputs for services that already run in DEV. Defaults reproduce the previous module behavior
+# (main), so an unset caller plans exactly as before. Live values are set in the environment's preserve input.
+variable "execution_permissions_boundary_arn" {
+  description = "IAM permissions boundary for the execution role. Null keeps the role unbounded (previous behavior)."
+  type        = string
+  default     = null
+}
+
+variable "task_permissions_boundary_arn" {
+  description = "IAM permissions boundary for the task role. Null keeps the role unbounded (previous behavior)."
+  type        = string
+  default     = null
+}
+
+variable "assume_role_source_conditions" {
+  description = "Add aws:SourceAccount and aws:SourceArn conditions to the task role trust policies. Changing it updates the live trust policy."
+  type        = bool
+  default     = false
+}
+
+variable "service_discovery_custom_health_check" {
+  description = "Declare health_check_custom_config on the Cloud Map service. Default true matches main, which always declares it. Changing it replaces the Cloud Map service."
+  type        = bool
+  default     = true
+}

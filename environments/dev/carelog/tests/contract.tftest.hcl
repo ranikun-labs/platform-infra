@@ -81,10 +81,12 @@ run "core_auth_enabled_applies_prod_contract" {
   command = plan
 
   variables {
+    shared = merge(var.shared, { namespace_name = "dev.internal" })
     carelog_core_auth = {
       enabled                = true
       valkey_tls_enabled     = true
       core_security_group_id = "sg-0123456789abcdef1"
+      https_enrollment       = { proxy_image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy", server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle" }
     }
   }
 
@@ -125,7 +127,9 @@ run "core_auth_rejects_plaintext_secret_values" {
   command = plan
 
   variables {
-    carelog_core_auth = { enabled = true, valkey_tls_enabled = true, core_security_group_id = "sg-0123456789abcdef1" }
+    shared = merge(var.shared, { namespace_name = "dev.internal" })
+    carelog_core_auth = { enabled = true, valkey_tls_enabled = true, core_security_group_id = "sg-0123456789abcdef1"
+    https_enrollment = { proxy_image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy", server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle" } }
     runtime = merge(var.runtime, {
       secrets = merge(var.runtime.secrets, { JWT_SECRET_KEY = "not-an-arn-plaintext-value" })
     })
@@ -138,7 +142,9 @@ run "core_auth_rejects_shared_enrollment_and_claims_secret" {
   command = plan
 
   variables {
-    carelog_core_auth = { enabled = true, valkey_tls_enabled = true, core_security_group_id = "sg-0123456789abcdef1" }
+    shared = merge(var.shared, { namespace_name = "dev.internal" })
+    carelog_core_auth = { enabled = true, valkey_tls_enabled = true, core_security_group_id = "sg-0123456789abcdef1"
+    https_enrollment = { proxy_image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy", server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle" } }
     runtime = merge(var.runtime, {
       secrets = merge(var.runtime.secrets, {
         CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/enrollment"
@@ -285,4 +291,91 @@ run "https_enrollment_requires_namespace" {
     }
   }
   expect_failures = [var.carelog_core_auth]
+}
+
+# Live preservation (no opt-in). Defaults add nothing; the live values keep the deployed service's name, config volume,
+# health-check start period, Core claims rule and identity settings in one plan.
+run "preserve_defaults_add_no_core_claims_rule" {
+  command = plan
+
+  assert {
+    condition     = length(aws_vpc_security_group_ingress_rule.core_claims) == 0 && var.preserve.assign_public_ip == false && var.preserve.service_discovery_custom_health_check == true
+    error_message = "Unset preservation inputs must match the previous behavior: no Core claims rule and the Cloud Map health check kept."
+  }
+}
+
+run "live_preserve_keeps_deployed_shape_with_opt_in_off" {
+  command = plan
+
+  variables {
+    service_name_override = "ranikun-carelog-dev-api"
+    preserve = {
+      assign_public_ip                      = true
+      execution_permissions_boundary_arn    = "arn:aws:iam::111122223333:policy/dev-boundary-execution"
+      task_permissions_boundary_arn         = "arn:aws:iam::111122223333:policy/dev-boundary-task"
+      assume_role_source_conditions         = true
+      service_discovery_custom_health_check = true
+      config_volume_name                    = "config-tree"
+      core_claims_security_group_id         = "sg-0123456789abcdef1"
+    }
+    runtime = merge(var.runtime, {
+      health_check = { command = ["CMD", "/test"], interval = 30, timeout = 5, retries = 3, start_period = 300 }
+    })
+  }
+
+  assert {
+    condition     = length(aws_vpc_security_group_ingress_rule.core_claims) == 1 && aws_vpc_security_group_ingress_rule.core_claims[0].referenced_security_group_id == "sg-0123456789abcdef1" && aws_vpc_security_group_ingress_rule.core_claims[0].from_port == 8080
+    error_message = "The live Core claims rule must keep its address (core_claims[0]) and its port."
+  }
+  assert {
+    condition     = output.service_name == "ranikun-carelog-dev-api" && jsondecode(module.service.baseline_container_definitions)[0].name == "ranikun-carelog-dev-api"
+    error_message = "The live service name must also name the container the release workflow targets."
+  }
+  assert {
+    condition     = jsondecode(module.service.baseline_container_definitions)[0].mountPoints == [{ sourceVolume = "config-tree", containerPath = "/run/secrets", readOnly = true }]
+    error_message = "The live config-tree volume must be mounted read-only at /run/secrets even with the opt-in off."
+  }
+  assert {
+    condition     = jsondecode(module.service.baseline_container_definitions)[0].healthCheck.startPeriod == 300
+    error_message = "The live health-check start period is 300 seconds."
+  }
+  assert {
+    condition     = jsondecode(module.service.baseline_container_definitions)[0].environment == [for k in sort(keys(var.runtime.environment)) : { name = k, value = var.runtime.environment[k] }]
+    error_message = "With the opt-in off the container environment must stay the operator's environment."
+  }
+}
+
+run "preserved_config_volume_replaces_opt_in_volume" {
+  command = plan
+
+  variables {
+    shared = merge(var.shared, { namespace_name = "dev.internal" })
+    preserve = {
+      config_volume_name = "config-tree"
+    }
+    carelog_core_auth = {
+      enabled                = true
+      valkey_tls_enabled     = true
+      core_security_group_id = "sg-0123456789abcdef1"
+      https_enrollment = {
+        proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
+        server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+      }
+    }
+  }
+
+  assert {
+    condition     = jsondecode(module.service.baseline_container_definitions)[0].mountPoints == [{ sourceVolume = "config-tree", containerPath = "/run/secrets", readOnly = true }]
+    error_message = "A preserved config volume must replace runtime-config, not add a second mount at /run/secrets."
+  }
+}
+
+run "preserve_rejects_non_policy_boundary" {
+  command = plan
+
+  variables {
+    preserve = { execution_permissions_boundary_arn = "dev-boundary-execution" }
+  }
+  expect_failures = [var.preserve]
 }

@@ -54,6 +54,10 @@ variable "carelog_core_auth" {
     error_message = "carelog_core_auth.https_enrollment requires carelog_core_auth.enabled = true."
   }
   validation {
+    condition     = !var.carelog_core_auth.enabled || var.carelog_core_auth.https_enrollment != null
+    error_message = "carelog_core_auth.enabled requires carelog_core_auth.https_enrollment: Core reaches Carelog only through the TLS listener on 8443."
+  }
+  validation {
     condition     = var.carelog_core_auth.https_enrollment == null || var.shared.namespace_name != null
     error_message = "https_enrollment needs shared.namespace_name: the TLS origin host and proxy SAN are <service>.<namespace>."
   }
@@ -143,6 +147,32 @@ variable "workload_public_subnet_ids" {
   validation {
     condition     = !var.workload_public_ip || length(var.workload_public_subnet_ids) > 0
     error_message = "Public IP tasks require explicit public subnets."
+  }
+}
+
+# Preserved settings of the DEV service that already runs (live facts, not opt-ins). Every default equals the module's
+# previous behavior, so an unset input plans the same as before. The live values go into dev-live-preserve.auto.tfvars.
+variable "preserve" {
+  description = "Live-service preservation inputs. Defaults reproduce the previous behavior; ARNs are placeholders in the examples."
+  type = object({
+    assign_public_ip                      = optional(bool, false)
+    execution_permissions_boundary_arn    = optional(string)
+    task_permissions_boundary_arn         = optional(string)
+    assume_role_source_conditions         = optional(bool, false)
+    service_discovery_custom_health_check = optional(bool, true)
+    config_volume_name                    = optional(string)
+    core_claims_security_group_id         = optional(string)
+  })
+  default = {}
+  validation {
+    condition = alltrue([for a in [
+      var.preserve.execution_permissions_boundary_arn, var.preserve.task_permissions_boundary_arn,
+    ] : a == null || can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", a))])
+    error_message = "Permissions boundaries must be IAM policy ARNs."
+  }
+  validation {
+    condition     = var.preserve.core_claims_security_group_id == null || can(regex("^sg-[0-9a-f]+$", var.preserve.core_claims_security_group_id))
+    error_message = "preserve.core_claims_security_group_id must be a security group ID (sg-...)."
   }
 }
 

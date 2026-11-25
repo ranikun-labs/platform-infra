@@ -4,12 +4,32 @@ locals {
   )
 }
 
+data "aws_caller_identity" "current" {}
+
+# Task role trust. Default: ECS service principal only (unchanged). assume_role_source_conditions adds the
+# confused-deputy guards that the live DEV roles already carry.
 data "aws_iam_policy_document" "assume" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
       type        = "Service"
       identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+    dynamic "condition" {
+      for_each = var.assume_role_source_conditions ? [1] : []
+      content {
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+    }
+    dynamic "condition" {
+      for_each = var.assume_role_source_conditions ? [1] : []
+      content {
+        test     = "ArnLike"
+        variable = "aws:SourceArn"
+        values   = ["arn:aws:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:*"]
+      }
     }
   }
 }
@@ -19,14 +39,16 @@ resource "aws_cloudwatch_log_group" "service" {
   tags              = var.tags
 }
 resource "aws_iam_role" "execution" {
-  name               = "${var.name}-execution"
-  assume_role_policy = data.aws_iam_policy_document.assume.json
-  tags               = var.tags
+  name                 = "${var.name}-execution"
+  assume_role_policy   = data.aws_iam_policy_document.assume.json
+  permissions_boundary = var.execution_permissions_boundary_arn
+  tags                 = var.tags
 }
 resource "aws_iam_role" "app" {
-  name               = "${var.name}-task"
-  assume_role_policy = data.aws_iam_policy_document.assume.json
-  tags               = var.tags
+  name                 = "${var.name}-task"
+  assume_role_policy   = data.aws_iam_policy_document.assume.json
+  permissions_boundary = var.task_permissions_boundary_arn
+  tags                 = var.tags
 }
 data "aws_iam_policy_document" "execution" {
   statement {
@@ -87,7 +109,10 @@ resource "aws_service_discovery_service" "service" {
     }
     routing_policy = "MULTIVALUE"
   }
-  health_check_custom_config {}
+  dynamic "health_check_custom_config" {
+    for_each = var.service_discovery_custom_health_check ? [1] : []
+    content {}
+  }
   tags = var.tags
 }
 resource "aws_ecs_task_definition" "baseline" {

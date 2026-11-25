@@ -1,0 +1,83 @@
+# Live DEV preserve values for environments/dev/carelog. Copy to dev-live-preserve.auto.tfvars (git-ignored, never commit).
+# Every ARN and ID below is a placeholder. Fill them from the live service on the operator machine.
+# Opt-ins stay off here (carelog_core_auth.enabled = false). With these values the plan must be a no-op against live.
+
+region         = "ap-northeast-2"
+aws_account_id = "123456789012"
+
+shared = {
+  vpc_id             = "vpc-REPLACE"
+  private_subnet_ids = ["subnet-REPLACE-a", "subnet-REPLACE-c"]
+  cluster_arn        = "arn:aws:ecs:ap-northeast-2:123456789012:cluster/dev-shared"
+  namespace_id       = "ns-REPLACE"
+  namespace_name    = "REPLACE.internal"
+}
+
+gateway_security_group_id = "sg-0000000000000000a"
+
+# The deployed service name. Also the container name the release workflow targets (CONTAINER variable).
+service_name_override = "ranikun-carelog-dev-api"
+
+preserve = {
+  # Live task runs in private subnets with a public IP (no NAT or VPC endpoints).
+  assign_public_ip                      = true
+  execution_permissions_boundary_arn    = "arn:aws:iam::123456789012:policy/REPLACE-dev-boundary-execution"
+  task_permissions_boundary_arn         = "arn:aws:iam::123456789012:policy/REPLACE-dev-boundary-task"
+  assume_role_source_conditions         = true
+  service_discovery_custom_health_check = true
+  # Live config volume, mounted read-only at /run/secrets. Name from the live task definition (verify in the runbook).
+  config_volume_name                    = "config-tree"
+  # Core security group for the live Core-to-product-port claims rule (aws_vpc_security_group_ingress_rule.core_claims).
+  core_claims_security_group_id         = "sg-0000000000000000b"
+}
+
+runtime = {
+  image              = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/carelog/api@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:123456789012:repository/ranikun/carelog/api"
+  container_port     = 8080
+  cpu                = 512
+  memory             = 1024
+  initial_desired_count = 0
+  # Names only in review. Values stay in the live task definition and are not copied here.
+  environment = {
+    SPRING_DATASOURCE_URL        = "REPLACE"
+    REDIS_HOST                   = "REPLACE"
+    REDIS_PORT                   = "REPLACE"
+    CARELOG_CORS_ALLOWED_ORIGINS = "REPLACE"
+    JWT_ACCESS_TOKEN_VALIDITY    = "REPLACE"
+    JWT_REFRESH_TOKEN_VALIDITY   = "REPLACE"
+  }
+  # Secrets Manager ARNs only. Never secret values.
+  secrets = {
+    SPRING_DATASOURCE_USERNAME                      = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/db-user-REPLACE"
+    SPRING_DATASOURCE_PASSWORD                      = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/db-password-REPLACE"
+    JWT_SECRET_KEY                                  = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/jwt-REPLACE"
+    GATEWAY_INTERNAL_SECRET                         = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/gateway-REPLACE"
+    CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET      = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/enrollment-REPLACE"
+    CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/claims-REPLACE"
+  }
+  # Every secret above must be covered here (exact ARN without the JSON-key suffix). Validated by the root.
+  execution_secret_arns = [
+    "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/db-user-REPLACE",
+    "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/db-password-REPLACE",
+    "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/jwt-REPLACE",
+    "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/gateway-REPLACE",
+    "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/enrollment-REPLACE",
+    "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/claims-REPLACE",
+  ]
+  execution_kms_key_arns = []
+  # startPeriod 300 is the live value.
+  health_check = {
+    command      = ["CMD-SHELL", "REPLACE_WITH_LIVE_HEALTHCHECK"]
+    interval     = 30
+    timeout      = 10
+    retries      = 3
+    start_period = 300
+  }
+  log_retention_days = 30
+}
+
+tags = {
+  Environment = "dev"
+  Owner       = "REPLACE"
+}
