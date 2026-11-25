@@ -19,7 +19,7 @@ locals {
     PLATFORM_IDENTITY_CARELOG_ENROLLMENT_ENABLED                     = "true"
     PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL                    = var.carelog_enrollment_origin
     PLATFORM_IDENTITY_PRODUCT_CLAIMS_ENABLED                         = "true"
-    PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL                        = var.carelog_enrollment_origin
+    PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL                        = var.carelog_claims_origin
     PLATFORM_IDENTITY_REDIS_TLS_ENABLED                              = tostring(var.dev_dual_auth.redis_tls_enabled)
   } : {}
 

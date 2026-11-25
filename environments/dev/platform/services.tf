@@ -50,6 +50,10 @@ variable "core_runtime" {
     ] : contains(concat(keys(var.core_runtime.environment), keys(var.core_runtime.secrets)), k)])
     error_message = "With dev_dual_auth enabled, core_runtime must provide PLATFORM_IDENTITY_REDIS_HOST, PLATFORM_IDENTITY_REDIS_PORT, PLATFORM_IDENTITY_DATASOURCE_URL, PLATFORM_IDENTITY_DATASOURCE_USERNAME, PLATFORM_IDENTITY_DATASOURCE_PASSWORD and PLATFORM_IDENTITY_JWT_SECRET_KEY (environment or secrets)."
   }
+  validation {
+    condition     = !var.dev_dual_auth.enabled || var.core_truststore == null || !contains(concat(keys(var.core_runtime.environment), keys(var.core_runtime.secrets)), "JAVA_TOOL_OPTIONS")
+    error_message = "core_runtime must not set JAVA_TOOL_OPTIONS when core_truststore is set; the truststore setting owns it."
+  }
 }
 
 # Composed container inputs. The dual-auth maps override runtime values on the keys they name; dev_dual_auth
@@ -62,9 +66,30 @@ locals {
   })
   gateway_container_secrets   = merge(var.gateway_runtime.secrets, local.gateway_dual_secrets)
   gateway_container_execution = setunion(var.gateway_runtime.execution_secret_arns, toset(values(local.gateway_dual_secrets)))
-  core_container_environment  = merge(var.core_runtime.environment, local.core_dual_env, { PLATFORM_CORE_PORT = "8081" })
+  core_container_environment  = merge(var.core_runtime.environment, local.core_dual_env, local.core_truststore_env, { PLATFORM_CORE_PORT = "8081" })
   core_container_secrets      = merge(var.core_runtime.secrets, local.core_dual_secrets)
   core_container_execution    = setunion(var.core_runtime.execution_secret_arns, toset(values(local.core_dual_secrets)))
+
+  # Core truststore (dev_dual_auth + core_truststore). The init container writes /run/carelog-trust/cacerts; the app
+  # reads it read-only. Empty when off, so the default task definition is unchanged.
+  core_truststore_on     = var.dev_dual_auth.enabled && var.core_truststore != null
+  core_truststore_volume = "core-truststore"
+  core_trust_init_name   = "core-trust-init"
+  core_truststore_env    = local.core_truststore_on ? { JAVA_TOOL_OPTIONS = "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit" } : {}
+  core_trust_init_containers = local.core_truststore_on ? [{
+    name        = local.core_trust_init_name
+    image       = var.core_truststore.trust_init_image
+    essential   = false
+    mountPoints = [{ sourceVolume = local.core_truststore_volume, containerPath = "/run/carelog-trust", readOnly = false }]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = "/ecs/${var.name_prefix}-core"
+        awslogs-region        = var.aws_region
+        awslogs-stream-prefix = "trust-init"
+      }
+    }
+  }] : []
 }
 module "gateway" {
   source                    = "../../../modules/ecs-service"
@@ -94,28 +119,33 @@ module "gateway" {
   depends_on                = [aws_lb_listener.https]
 }
 module "core" {
-  source                    = "../../../modules/ecs-service"
-  region                    = var.aws_region
-  name                      = "${var.name_prefix}-core"
-  cluster_arn               = var.cluster_arn
-  vpc_id                    = var.vpc_id
-  private_subnet_ids        = var.workload_public_ip ? var.public_subnet_ids : var.private_subnet_ids
-  assign_public_ip          = var.workload_public_ip
-  namespace_id              = var.namespace_id
-  image                     = var.core_runtime.image
-  ecr_repository_arn        = var.core_runtime.ecr_repository_arn
-  container_port            = 8081
-  cpu                       = var.core_runtime.cpu
-  memory                    = var.core_runtime.memory
-  desired_count             = var.core_desired_count
-  first_task_definition_arn = var.core_first_task_definition_arn
-  environment               = local.core_container_environment
-  secrets                   = local.core_container_secrets
-  execution_secret_arns     = local.core_container_execution
-  execution_kms_key_arns    = var.core_runtime.execution_kms_key_arns
-  health_check              = var.core_runtime.health_check
-  log_retention_days        = var.core_runtime.log_retention_days
-  tags                      = var.tags
+  source                         = "../../../modules/ecs-service"
+  region                         = var.aws_region
+  name                           = "${var.name_prefix}-core"
+  cluster_arn                    = var.cluster_arn
+  vpc_id                         = var.vpc_id
+  private_subnet_ids             = var.workload_public_ip ? var.public_subnet_ids : var.private_subnet_ids
+  assign_public_ip               = var.workload_public_ip
+  namespace_id                   = var.namespace_id
+  image                          = var.core_runtime.image
+  ecr_repository_arn             = var.core_runtime.ecr_repository_arn
+  container_port                 = 8081
+  cpu                            = var.core_runtime.cpu
+  memory                         = var.core_runtime.memory
+  desired_count                  = var.core_desired_count
+  first_task_definition_arn      = var.core_first_task_definition_arn
+  environment                    = local.core_container_environment
+  secrets                        = local.core_container_secrets
+  execution_secret_arns          = local.core_container_execution
+  execution_kms_key_arns         = var.core_runtime.execution_kms_key_arns
+  health_check                   = var.core_runtime.health_check
+  log_retention_days             = var.core_runtime.log_retention_days
+  volume_names                   = local.core_truststore_on ? toset([local.core_truststore_volume]) : toset([])
+  app_mount_points               = local.core_truststore_on ? [{ source_volume = local.core_truststore_volume, container_path = "/run/carelog-trust", read_only = true }] : []
+  additional_containers          = local.core_trust_init_containers
+  additional_ecr_repository_arns = local.core_truststore_on ? toset([var.core_truststore.ecr_repository_arn]) : toset([])
+  app_depends_on                 = local.core_truststore_on ? [{ container_name = local.core_trust_init_name, condition = "SUCCESS" }] : []
+  tags                           = var.tags
 }
 resource "aws_vpc_security_group_egress_rule" "alb_gateway" {
   for_each                     = var.enable_alb ? toset(["8080", "9091"]) : toset([])

@@ -85,14 +85,51 @@ variable "workload_public_ip" {
 variable "carelog_enrollment_origin" {
   type        = string
   default     = null
-  description = "Private origin of DEV Carelog for Core enrollment and product claims: scheme, host and port only, no path. Core appends /api/v1/... itself. Required when dev_dual_auth.enabled."
+  description = "Private HTTPS origin of DEV Carelog's enrollment listener (TLS sidecar, port 8443): scheme, host and port only, no path. Core appends /api/v1/... itself. Core rejects non-loopback http for enrollment (platform-services f9adfd3), so https is required. Required when dev_dual_auth.enabled."
   validation {
-    condition     = var.carelog_enrollment_origin == null || can(regex("^https?://[^/?#@ ]+$", var.carelog_enrollment_origin))
-    error_message = "carelog_enrollment_origin must be an http or https origin without a path, query, fragment or userinfo."
+    condition     = var.carelog_enrollment_origin == null || can(regex("^https://[^/?#@ ]+$", var.carelog_enrollment_origin))
+    error_message = "carelog_enrollment_origin must be an https origin without a path, query, fragment or userinfo."
   }
   validation {
     condition     = !var.dev_dual_auth.enabled || var.carelog_enrollment_origin != null
     error_message = "carelog_enrollment_origin is required when dev_dual_auth.enabled is true."
+  }
+}
+
+variable "carelog_claims_origin" {
+  type        = string
+  default     = null
+  description = "Private origin of DEV Carelog for Core product claims, on the product port (plain http allowed by Core for claims). Scheme, host and port only. The TLS listener is enrollment-only, so claims stay here. Required when dev_dual_auth.enabled."
+  validation {
+    condition     = var.carelog_claims_origin == null || can(regex("^https?://[^/?#@ ]+$", var.carelog_claims_origin))
+    error_message = "carelog_claims_origin must be an http or https origin without a path, query, fragment or userinfo."
+  }
+  validation {
+    condition     = !var.dev_dual_auth.enabled || var.carelog_claims_origin != null
+    error_message = "carelog_claims_origin is required when dev_dual_auth.enabled is true."
+  }
+}
+
+# Core trust for the Carelog enrollment CA. The init image is built FROM the exact Core image digest with the PUBLIC CA
+# bundle baked in. It writes a derived truststore (Core default cacerts plus the CA) to the task volume, which Core reads
+# read-only through JAVA_TOOL_OPTIONS. Public material only; never a secret.
+variable "core_truststore" {
+  type = object({
+    trust_init_image   = string # repo@sha256:<64 hex>
+    ecr_repository_arn = string
+  })
+  default     = null
+  description = "Core trust-init image (digest pinned, built FROM the Core image digest) and its ECR repository. Required when dev_dual_auth.enabled."
+  validation {
+    condition = var.core_truststore == null || (
+      can(regex("^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$", var.core_truststore.trust_init_image)) &&
+      can(regex("^arn:aws:ecr:[a-z0-9-]+:[0-9]{12}:repository/[a-z0-9._/-]+$", var.core_truststore.ecr_repository_arn))
+    )
+    error_message = "core_truststore needs a digest-pinned private ECR image and an ECR repository ARN."
+  }
+  validation {
+    condition     = !var.dev_dual_auth.enabled || var.core_truststore != null
+    error_message = "core_truststore is required when dev_dual_auth.enabled is true; Core must trust the Carelog enrollment CA."
   }
 }
 
