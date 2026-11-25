@@ -45,13 +45,13 @@ module "gateway" {
   desired_count             = var.gateway_desired_count
   first_task_definition_arn = var.gateway_first_task_definition_arn
   target_group_arn          = var.enable_alb ? aws_lb_target_group.gateway[0].arn : null
-  environment = merge(var.gateway_runtime.environment, {
+  environment = merge(var.gateway_runtime.environment, local.gateway_dual_env, {
     PLATFORM_GATEWAY_PORT            = "8080"
     PLATFORM_GATEWAY_MANAGEMENT_PORT = "9091"
     PLATFORM_GATEWAY_AUTH_URI        = "http://${var.name_prefix}-core.${var.namespace_name}:8081"
   })
-  secrets                = var.gateway_runtime.secrets
-  execution_secret_arns  = var.gateway_runtime.execution_secret_arns
+  secrets                = merge(var.gateway_runtime.secrets, local.gateway_dual_secrets)
+  execution_secret_arns  = setunion(var.gateway_runtime.execution_secret_arns, toset(values(local.gateway_dual_secrets)))
   execution_kms_key_arns = var.gateway_runtime.execution_kms_key_arns
   health_check           = var.gateway_runtime.health_check
   log_retention_days     = var.gateway_runtime.log_retention_days
@@ -75,9 +75,9 @@ module "core" {
   memory                    = var.core_runtime.memory
   desired_count             = var.core_desired_count
   first_task_definition_arn = var.core_first_task_definition_arn
-  environment               = merge(var.core_runtime.environment, { PLATFORM_CORE_PORT = "8081" })
-  secrets                   = var.core_runtime.secrets
-  execution_secret_arns     = var.core_runtime.execution_secret_arns
+  environment               = merge(var.core_runtime.environment, local.core_dual_env, { PLATFORM_CORE_PORT = "8081" })
+  secrets                   = merge(var.core_runtime.secrets, local.core_dual_secrets)
+  execution_secret_arns     = setunion(var.core_runtime.execution_secret_arns, toset(values(local.core_dual_secrets)))
   execution_kms_key_arns    = var.core_runtime.execution_kms_key_arns
   health_check              = var.core_runtime.health_check
   log_retention_days        = var.core_runtime.log_retention_days

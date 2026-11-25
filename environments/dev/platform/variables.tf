@@ -79,3 +79,54 @@ variable "workload_public_ip" {
   type    = bool
   default = false
 }
+
+# DEV-only: one Core serving Carelog auth and Finance reference auth together. Off by default, so the
+# baseline Core/Gateway environment is unchanged. Values are secret ARNs only; never secret values.
+variable "carelog_private_base_url" {
+  type        = string
+  default     = null
+  description = "Private HTTPS origin of DEV Carelog (no path, query or userinfo). Placeholder: the Carelog lane defines the endpoint. Required when dev_dual_auth.enabled."
+  validation {
+    condition     = var.carelog_private_base_url == null || can(regex("^https://[^/?#@ ]+$", var.carelog_private_base_url))
+    error_message = "carelog_private_base_url must be an https origin without a path, query, fragment or userinfo."
+  }
+  validation {
+    condition     = !var.dev_dual_auth.enabled || var.carelog_private_base_url != null
+    error_message = "carelog_private_base_url is required when dev_dual_auth.enabled is true."
+  }
+}
+
+variable "dev_dual_auth" {
+  type = object({
+    enabled = bool
+    # Same secret for Core's signing key and Gateway's verification key.
+    jwt_signing_key_secret_arn = optional(string)
+    # Gateway caller secret. The Finance receiver must reference this same secret (finance root dev_trusted_context).
+    finance_trusted_context_secret_arn = optional(string)
+    # Must equal Carelog's enrollment credential (Carelog side: CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET).
+    carelog_enrollment_secret_arn = optional(string)
+    # Must equal Carelog's internal identity claims secret (Carelog side: CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET).
+    product_claims_secret_arn = optional(string)
+    finance_service_name      = optional(string, "dev-finance")
+    finance_container_port    = optional(number, 8080)
+    # Requested DEV value. Only valid once managed Valkey TLS is verified end to end (see README).
+    redis_tls_enabled = optional(bool, true)
+  })
+  default     = { enabled = false }
+  description = "DEV-only dual-auth opt-in (Core Carelog + Finance reference, Gateway Finance route). Guards in platform-services reject prod markers."
+  validation {
+    condition = !var.dev_dual_auth.enabled || alltrue([
+      for arn in [
+        var.dev_dual_auth.jwt_signing_key_secret_arn,
+        var.dev_dual_auth.finance_trusted_context_secret_arn,
+        var.dev_dual_auth.carelog_enrollment_secret_arn,
+        var.dev_dual_auth.product_claims_secret_arn,
+      ] : arn != null && can(regex("^arn:aws:secretsmanager:[^:]+:[0-9]{12}:secret:[^:]+$", arn))
+    ])
+    error_message = "dev_dual_auth requires Secrets Manager secret ARNs (without JSON-key suffixes) for all four secret fields."
+  }
+  validation {
+    condition     = can(regex("^[a-z0-9-]+$", var.dev_dual_auth.finance_service_name)) && var.dev_dual_auth.finance_container_port > 0 && var.dev_dual_auth.finance_container_port < 65536
+    error_message = "finance_service_name must be a Cloud Map DNS label and finance_container_port a valid TCP port."
+  }
+}

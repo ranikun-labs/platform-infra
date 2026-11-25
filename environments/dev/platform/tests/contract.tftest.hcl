@@ -103,3 +103,48 @@ run "no_alb_requires_connector" {
   }
   expect_failures = [var.gateway_cloudflared]
 }
+
+run "dev_dual_auth_enabled_plans_with_secret_arns" {
+  command = plan
+  variables {
+    carelog_private_base_url = "https://carelog.dev.internal"
+    dev_dual_auth = {
+      enabled                            = true
+      jwt_signing_key_secret_arn         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
+      finance_trusted_context_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-trusted-context-AbCdEf"
+      carelog_enrollment_secret_arn      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-enrollment-AbCdEf"
+      product_claims_secret_arn          = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-claims-AbCdEf"
+    }
+  }
+  assert {
+    condition     = module.core.service_name != null && module.gateway.service_name != null
+    error_message = "DEV dual-auth must plan both services with the same Core and Gateway topology."
+  }
+}
+
+run "dev_dual_auth_requires_secret_arns" {
+  command = plan
+  variables {
+    carelog_private_base_url = "https://carelog.dev.internal"
+    dev_dual_auth = {
+      enabled                    = true
+      jwt_signing_key_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf:key::"
+    }
+  }
+  expect_failures = [var.dev_dual_auth]
+}
+
+run "dev_dual_auth_requires_carelog_origin_without_path" {
+  command = plan
+  variables {
+    carelog_private_base_url = "https://carelog.dev.internal/api"
+    dev_dual_auth = {
+      enabled                            = true
+      jwt_signing_key_secret_arn         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
+      finance_trusted_context_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-trusted-context-AbCdEf"
+      carelog_enrollment_secret_arn      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-enrollment-AbCdEf"
+      product_claims_secret_arn          = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-claims-AbCdEf"
+    }
+  }
+  expect_failures = [var.carelog_private_base_url]
+}

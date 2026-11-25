@@ -17,6 +17,25 @@ variable "shared" {
   })
 }
 variable "gateway_security_group_id" { type = string }
+
+# DEV-only trusted-context receiver (dev profile) for the Gateway-routed Finance task. Off by default.
+# The secret must be the same secret as platform's dev_dual_auth.finance_trusted_context_secret_arn.
+variable "dev_trusted_context" {
+  type = object({
+    enabled    = bool
+    secret_arn = optional(string)
+  })
+  default     = { enabled = false }
+  description = "Enables the trusted-context receiver under the dev profile. Never combine with a prod profile or marker."
+  validation {
+    condition = !var.dev_trusted_context.enabled || (
+      var.dev_trusted_context.secret_arn != null &&
+      can(regex("^arn:aws:secretsmanager:[^:]+:[0-9]{12}:secret:[^:]+$", var.dev_trusted_context.secret_arn))
+    )
+    error_message = "dev_trusted_context requires a Secrets Manager secret ARN (without a JSON-key suffix) when enabled."
+  }
+}
+
 variable "runtime" {
   type = object({
     image                     = string
@@ -40,6 +59,12 @@ variable "runtime" {
     })
     log_retention_days = number
   })
+  validation {
+    # The release gate requires an explicit SPRING_FLYWAY_ENABLED=false on the active container. Migrations run as a
+    # separate step, never at service startup.
+    condition     = lookup(var.runtime.environment, "SPRING_FLYWAY_ENABLED", "false") == "false"
+    error_message = "runtime.environment must not enable Flyway at startup; migrations run as a separate step."
+  }
 }
 variable "tags" {
   type    = map(string)

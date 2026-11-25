@@ -37,3 +37,45 @@ run "gateway_only_service_ingress" {
     error_message = "Only SCG should be able to reach the private product port, with a zero-task bootstrap."
   }
 }
+
+run "dev_trusted_context_plans_with_secret_arn" {
+  command = plan
+  variables {
+    dev_trusted_context = {
+      enabled    = true
+      secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-trusted-context-AbCdEf"
+    }
+  }
+  assert {
+    condition     = aws_vpc_security_group_ingress_rule.gateway.from_port == 8080 && var.runtime.initial_desired_count == 0
+    error_message = "DEV trusted context must keep the gateway-only port and zero-task bootstrap."
+  }
+}
+
+run "dev_trusted_context_requires_secret_arn" {
+  command = plan
+  variables {
+    dev_trusted_context = { enabled = true }
+  }
+  expect_failures = [var.dev_trusted_context]
+}
+
+run "flyway_at_startup_is_rejected" {
+  command = plan
+  variables {
+    runtime = {
+      container_port         = 8080
+      image                  = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/finance@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ecr_repository_arn     = "arn:aws:ecr:ap-northeast-2:111122223333:repository/finance"
+      cpu                    = 256
+      memory                 = 512
+      environment            = { SPRING_FLYWAY_ENABLED = "true" }
+      secrets                = {}
+      execution_secret_arns  = []
+      execution_kms_key_arns = []
+      health_check           = { command = ["CMD", "/test"], interval = 30, timeout = 5, retries = 3, start_period = 30 }
+      log_retention_days     = 7
+    }
+  }
+  expect_failures = [var.runtime]
+}
