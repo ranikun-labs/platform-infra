@@ -1,0 +1,105 @@
+# Carelog DEV TLS front proxy. Rendered by proxy-entrypoint.sh: placeholders __TASK_IPV4__, __TLS_DIR__, __NGINX_DIR__.
+#
+# Topology (awsvpc task, one netns shared by proxy and carelog-be):
+#   carelog-be app  -> 127.0.0.1:8080 only (SERVER_ADDRESS=127.0.0.1). Nothing else reaches it directly.
+#   this proxy      -> __TASK_IPV4__:8080  plain HTTP  (Gateway routes + transition-only Core claims)
+#                   -> __TASK_IPV4__:8443  TLS         (Core enrollment PUT + Core claims GET)
+#
+# Why 8080 is filtered here and not in the app: Core and Gateway share the task IP:8080 port. Core's SG rule on
+# 8080 cannot separate enrollment from claims, and the app's enrollment chain is enabled for the whole app, so
+# the only place to deny enrollment on 8080 without a Gateway change is this front.
+#
+# Matching: regexes run on the decoded, normalized $uri. The request is forwarded raw (proxy_pass without a URI),
+# so Tomcat sees exactly what the client sent. Requests containing encodings or separators that Tomcat decodes
+# differently are refused before location matching ($request_uri includes the query string, so they are refused too).
+# merge_slashes off keeps "//" distinct: "//api/..." does not match "^/api/" and falls to the 403 default.
+
+# Loopback-only health server for the ECS container healthCheck. Not on the task IP.
+server {
+    listen 127.0.0.1:9180;
+    server_tokens off;
+    access_log off;
+
+    location = /healthz {
+        limit_except GET { deny all; }
+        proxy_pass http://127.0.0.1:8081/actuator/health/liveness;
+    }
+
+    location / {
+        return 404;
+    }
+}
+
+# Plain HTTP front on the task IP. Still required after the transition: Gateway sends /api/** here (Gateway SG
+# and target unchanged). Core claims on this port exist only during the rollback window (see claims-8080.inc).
+server {
+    listen __TASK_IPV4__:8080;
+    server_tokens off;
+    merge_slashes off;
+    client_max_body_size 10m;
+
+    if ($request_uri ~* "(%2e|%2f|%3b|%5c|%00|;|\x5c|\.\.)") {
+        return 403;
+    }
+
+    # Transition-only: Core claims GET (old Core image on 8080). Rendered by the entrypoint; empty when disabled.
+    include __NGINX_DIR__/conf.d/claims-8080.inc;
+
+    # Enrollment and every other internal path are never served on 8080. Case-insensitive so that no
+    # capitalisation variant falls through to the Gateway pass-through below.
+    location ~* "^/api/v1/internal(/|$)" {
+        return 403;
+    }
+
+    # Gateway: carelog-be is Path=/api/** (after /api/v1/auth/**, which Gateway sends to Core).
+    location ~ "^/api/" {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+    }
+
+    location / {
+        return 403;
+    }
+}
+
+# TLS listener on the task IP. Core only: enrollment PUT and claims GET. Everything else is 403.
+server {
+    listen __TASK_IPV4__:8443 ssl;
+    server_tokens off;
+    merge_slashes off;
+    ssl_certificate __TLS_DIR__/server.crt;
+    ssl_certificate_key __TLS_DIR__/server.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 4k;
+
+    if ($request_uri ~* "(%2e|%2f|%3b|%5c|%00|;|\x5c|\.\.)") {
+        return 403;
+    }
+
+    # Core sends plain ASCII UUID paths only. Refuse every percent-encoding on this listener: $uri is decoded before
+    # location matching, so an encoded spelling of an allowed path (for example %69nternal) would otherwise match and
+    # reach the app as the encoded form. (8080 keeps encodings because Gateway traffic may carry them.)
+    if ($request_uri ~ "%") {
+        return 403;
+    }
+
+    # Core enrollment. accountId is a UUID (EnrollmentController: @PathVariable UUID). Authorization: app.
+    location ~ "^/api/v1/internal/v1/identity/carelog/enrollments/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" {
+        limit_except PUT { deny all; }
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # Core claims. accountId is a UUID (InternalIdentityClaimsController: @PathVariable UUID). Authorization: app.
+    location ~ "^/api/v1/internal/identity/claims/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" {
+        limit_except GET { deny all; }
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location / {
+        return 403;
+    }
+}

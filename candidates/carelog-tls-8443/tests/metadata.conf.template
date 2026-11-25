@@ -1,0 +1,17 @@
+# Test-only ECS task metadata endpoint. Placeholders __PID__, __ERRLOG__, __IP__ are filled by test-proxy-host.sh.
+daemon off;
+worker_processes 1;
+pid __PID__;
+error_log __ERRLOG__;
+events { worker_connections 16; }
+http {
+    access_log off;
+    server {
+        listen 127.0.0.1:19000;
+        location = /task {
+            default_type application/json;
+            return 200 '{"Containers":[{"Networks":[{"IPv4Addresses":["__IP__"]}]}]}';
+        }
+        location / { return 404; }
+    }
+}
