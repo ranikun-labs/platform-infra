@@ -2,6 +2,8 @@
 # DEV 읽기 전용 진단. AWS 읽기 API만 호출한다. task definition 원문과 비밀값은 출력하지 않는다.
 #   run       CI용: 자격 증명 검증 -> 읽기 수집 -> 마스킹 요약 -> $GITHUB_STEP_SUMMARY
 #   selftest  합성 데이터로 마스킹 필터, 판정 규칙, 파싱 실패 처리를 검증한다 (AWS 호출 없음)
+# 이름 기준: platform-services 실제 바인딩 이름(gateway-app/platform-core application.yml)만 인정한다.
+#            레거시 이름(예: FINANCE_REFERENCE_ENABLED)은 alias가 없으므로 없는 값으로 취급한다.
 # 판정 원칙: 명시 값(false, 마운트 부재, 비정상 mode)만 확정 근거로 쓴다.
 #           environmentFiles가 있는 서비스에서 "미설정"으로 보이는 항목은 부분 확인으로 낮춘다.
 set -uo pipefail
@@ -14,8 +16,17 @@ SUMMARY_OUT=${GITHUB_STEP_SUMMARY:-/dev/stdout}
 DENIED=()
 ERRORS=()
 
-# 원문 task definition -> 마스킹 요약. 값은 허용목록 항목만 남기고, 나머지는 존재 여부(hints)만 남긴다.
+# 원문 task definition -> 마스킹 요약. 값은 허용목록 이름의 값만 남기고, 나머지 env 이름은 버린다.
+# 허용목록: 비밀이 아닌 플래그·URI·프로파일 이름만 (실제 바인딩 이름, 위 주석 참조).
 read -r -d '' SANITIZE <<'JQ' || true
+def allowed: test("^(SPRING_PROFILES_ACTIVE"
+  + "|VALKEY_TLS_ENABLED|CARELOG_IDENTITY_ENROLLMENT_ENABLED|CARELOG_INTERNAL_IDENTITY_CLAIMS_ENABLED"
+  + "|PLATFORM_IDENTITY_AUTH_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_ENABLED"
+  + "|PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED"
+  + "|PLATFORM_IDENTITY_REDIS_TLS_ENABLED"
+  + "|PLATFORM_GATEWAY_FINANCE_BE_URI|PLATFORM_GATEWAY_FINANCE_REFERENCE_ENABLED"
+  + "|PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_ENABLED|PLATFORM_GATEWAY_CARELOG_REGISTRATION_ENABLED"
+  + "|PLATFORM_GATEWAY_REDIS_TLS_ENABLED)$");
 def flagname: test("(ENABLED|ENABLE|SIGNUP|DUAL_AUTH|_TLS)$");
 def secretish: test("(^|_)(PASSWORD|PASSWD|SECRET|TOKEN|KEY|CREDENTIALS?|PRIVATE|PASS|JDBC|DSN)(_|$)");
 # URL -> host[:port]. 마지막 '@' 뒤만 취해 userinfo를 버리고, 호스트 문자 집합에 맞지 않으면 <생략>으로 닫는다(fail-closed).
@@ -29,7 +40,6 @@ def safe($n; $v):
   elif ($n | secretish) then null
   elif ($n | flagname) then (if ($v | test("^(?i)(true|false)$")) then $v else "<비표준 값 생략>" end)
   elif $n == "SPRING_PROFILES_ACTIVE" then (if ($v | test("^[a-z0-9_,-]{1,64}$")) then $v else "<생략>" end)
-  elif $n == "PORT" then (if ($v | test("^[0-9]{1,5}$")) then $v else "<생략>" end)
   elif ($n | test("(_URI|_URL)$")) then (if ($v | test("^[ -~]+$")) then ($v | hostonly) else "<생략>" end)
   else null end;
 def secret_ref:
@@ -41,7 +51,7 @@ def cont:
     image: (.image | split("@")[0]),
     digest: (if (.image | contains("@")) then (.image | split("@")[1]) else null end),
     env_files: ((.environmentFiles // []) | length),
-    env: [ (.environment // [])[] | {name: .name, value: safe(.name; .value)} ],
+    env: [ (.environment // [])[] | select(.name | allowed) | {name: .name, value: safe(.name; .value)} ],
     secrets: [ (.secrets // [])[] | {name: .name, ref: secret_ref} ],
     mounts: [ (.mountPoints // [])[] | {volume: .sourceVolume, path: .containerPath, ro: (.readOnly // false)} ],
     hints: {
@@ -106,19 +116,26 @@ def row($n; $item; $status; $ev): "| \($n) | \($item) | \($status) | \($ev) |";
          + (if any($c[]; .hints.rds_ca_mount) then [] else ["/run/rds-ca.pem 마운트 없음"] end)));
       "sslrootcert=/run/rds-ca.pem 일치=\(any($c[]; .hints.sslrootcert_rds_ca)) · sslrootcert 항목=\(any($c[]; .hints.sslrootcert_env)) · rds-ca 마운트=\(any($c[]; .hints.rds_ca_mount))")),
 (cs("core") as $c
-  | row(3; "Core dev 프로파일·PLATFORM_IDENTITY_AUTH_ENABLED·FINANCE 플래그·core secret";
+  | row(3; "Core dev 프로파일·PLATFORM_IDENTITY_AUTH_ENABLED·FINANCE_REFERENCE/SIGNUP/DEV_DUAL_AUTH·core secret";
       verdict("core"; $c;
-        profdev($c) and flagtrue($c; "^PLATFORM_IDENTITY_AUTH_ENABLED$") and flagtrue($c; "^FINANCE_REFERENCE_ENABLED$")
-          and flagtrue($c; "^FINANCE_SIGNUP") and flagtrue($c; "^FINANCE_DEV_DUAL_AUTH$")
-          and hassec($c; "PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL") and hassec($c; "PLATFORM_IDENTITY_PRODUCT_CLAIMS_SERVICE_SECRET");
-        (profbad($c) + flagbad($c; "^(PLATFORM_IDENTITY_AUTH_ENABLED|FINANCE_REFERENCE_ENABLED|FINANCE_SIGNUP|FINANCE_DEV_DUAL_AUTH)")));
-      "env: \(vals($c; "^(SPRING_PROFILES_ACTIVE|PLATFORM_IDENTITY_AUTH_ENABLED|FINANCE_)") | join(", ") | orna) · secret: \(secs($c; "^PLATFORM_IDENTITY_(CARELOG_ENROLLMENT_CREDENTIAL|PRODUCT_CLAIMS_SERVICE_SECRET)$") | join(", ") | orna)")),
+        profdev($c)
+          and flagtrue($c; "^PLATFORM_IDENTITY_AUTH_ENABLED$")
+          and flagtrue($c; "^PLATFORM_IDENTITY_FINANCE_REFERENCE_ENABLED$")
+          and flagtrue($c; "^PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED$")
+          and flagtrue($c; "^PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED$")
+          and hassec($c; "PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL")
+          and hassec($c; "PLATFORM_IDENTITY_PRODUCT_CLAIMS_SERVICE_SECRET");
+        (profbad($c) + flagbad($c; "^(PLATFORM_IDENTITY_AUTH_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED)$")));
+      "env: \(vals($c; "^(SPRING_PROFILES_ACTIVE|PLATFORM_IDENTITY_AUTH_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED|PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED)$") | join(", ") | orna) · secret: \(secs($c; "^PLATFORM_IDENTITY_(CARELOG_ENROLLMENT_CREDENTIAL|PRODUCT_CLAIMS_SERVICE_SECRET)$") | join(", ") | orna)")),
 (cs("gateway") as $g
-  | row(4; "Gateway Finance 라우팅 (FINANCE_BE_URI·FINANCE_REFERENCE_ENABLED·trusted-context secret)";
+  | row(4; "Gateway Finance 라우팅 (PLATFORM_GATEWAY_FINANCE_BE_URI·REFERENCE/TRUSTED_CONTEXT 플래그·trusted-context secret)";
       verdict("gateway"; $g;
-        has($g; "^FINANCE_BE_URI$") and flagtrue($g; "^FINANCE_REFERENCE_ENABLED$") and hassec($g; "PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_SERVICE_SECRET");
-        flagbad($g; "^FINANCE_REFERENCE_ENABLED$"));
-      (vals($g; "^(FINANCE_BE_URI|FINANCE_REFERENCE_ENABLED)$") + ["secret=\(secs($g; "^PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_SERVICE_SECRET$") | join(", ") | orna)"] | join(", ")))),
+        has($g; "^PLATFORM_GATEWAY_FINANCE_BE_URI$")
+          and flagtrue($g; "^PLATFORM_GATEWAY_FINANCE_REFERENCE_ENABLED$")
+          and flagtrue($g; "^PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_ENABLED$")
+          and hassec($g; "PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_SERVICE_SECRET");
+        flagbad($g; "^(PLATFORM_GATEWAY_FINANCE_REFERENCE_ENABLED|PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_ENABLED)$"));
+      "\(vals($g; "^(PLATFORM_GATEWAY_FINANCE_BE_URI|PLATFORM_GATEWAY_FINANCE_REFERENCE_ENABLED|PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_ENABLED|PLATFORM_GATEWAY_CARELOG_REGISTRATION_ENABLED)$") | join(", ") | orna) · secret=\(secs($g; "^PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_SERVICE_SECRET$") | join(", ") | orna)")),
 (cs("carelog") as $c
   | row(5; "Carelog 내부 identity 플래그 + secret (정확한 이름 매칭)";
       verdict("carelog"; $c;
@@ -131,16 +148,16 @@ def row($n; $item; $status; $ev): "| \($n) | \($item) | \($status) | \($ev) |";
   | [ $ec[] | select(.kind == "replication-group") ] as $rg
   | [ $ec[] | select(.kind == "serverless") ] as $sl
   | ((any($rg[]; .transit_encryption == true and .mode == "required")) or (($sl | length) > 0)) as $transit
-  | ($transit and flagtrue($c; "^VALKEY_TLS_ENABLED$") and (flagtrue($k; "^REDIS_TLS_ENABLED$") or flagtrue($g; "^REDIS_TLS_ENABLED$"))) as $ok
+  | ($transit and flagtrue($c; "^VALKEY_TLS_ENABLED$") and (flagtrue($k; "^PLATFORM_IDENTITY_REDIS_TLS_ENABLED$") or flagtrue($g; "^PLATFORM_GATEWAY_REDIS_TLS_ENABLED$"))) as $ok
   | ([ $rg[] | select(.transit_encryption != true or .mode != "required") | "TransitEncryption=\(.transit_encryption | tostring)/Mode=\(.mode // "미확인")" ]
-     + flagbad($c; "^VALKEY_TLS_ENABLED$") + flagbad($k; "^REDIS_TLS_ENABLED$") + flagbad($g; "^REDIS_TLS_ENABLED$")) as $why
-  | row(6; "Valkey TLS: 전송 암호화 required + 앱 TLS 플래그";
+     + flagbad($c; "^VALKEY_TLS_ENABLED$") + flagbad($k; "^PLATFORM_IDENTITY_REDIS_TLS_ENABLED$") + flagbad($g; "^PLATFORM_GATEWAY_REDIS_TLS_ENABLED$")) as $why
+  | row(6; "Valkey TLS: 전송 암호화 required + 앱 TLS 플래그 (VALKEY_TLS / PLATFORM_IDENTITY·GATEWAY_REDIS_TLS)";
       (if denied("^elasticache:DescribeReplicationGroups") then "권한 부족"
        elif ($rg | length) == 0 and ($sl | length) == 0 then (if denied("^elasticache:DescribeServerlessCaches") then "권한 부족" else "누락 (replication group 미발견)" end)
        elif $ok then "확인됨" + (if ($rg | length) == 0 then " (serverless: TLS 전용 설계, 값 미열람)" else "" end)
        elif ($why | length) > 0 then "누락 (\($why | join(", ")))"
        else "누락" end);
-      ("ElastiCache: \([ $ec[] | "\(.id) \(.kind) transit=\(.transit_encryption | tostring) mode=\(.mode // "미확인")" ] | join(", ") | orna) · \((vals($c; "^VALKEY_TLS_ENABLED$") + vals($k; "^REDIS_TLS_ENABLED$") + vals($g; "^REDIS_TLS_ENABLED$")) | join(", ") | orna)"))),
+      ("ElastiCache: \([ $ec[] | "\(.id) \(.kind) transit=\(.transit_encryption | tostring) mode=\(.mode // "미확인")" ] | join(", ") | orna) · \((vals($c; "^VALKEY_TLS_ENABLED$") + vals($k; "^PLATFORM_IDENTITY_REDIS_TLS_ENABLED$") + vals($g; "^PLATFORM_GATEWAY_REDIS_TLS_ENABLED$")) | join(", ") | orna)"))),
 (.rds.clusters // []) as $cl | (.rds.instances // []) as $ins
   | row(7; "RDS force_ssl·CA 식별자";
       (if ($cl | length) == 0 then (if denied("^rds:") then "권한 부족" else "누락 (dev Aurora 클러스터 미발견)" end)
@@ -298,7 +315,7 @@ selftest() {
     {"name":"CARELOG_IDENTITY_ENROLLMENT_ENABLED","value":"FAKE-SECRET-XYZ"},
     {"name":"DB_PASSWORD","value":"FAKE-SECRET-123"},
     {"name":"SPRING_DATASOURCE_URL","value":"jdbc:postgresql://db.internal.example:5432/carelog?sslrootcert=/run/rds-ca.pem&password=FAKE-SECRET-URL"},
-    {"name":"FINANCE_BE_URI","value":"https://user:FAKE-SECRET-URI@finance-be.internal:8080/path"}],
+    {"name":"PLATFORM_GATEWAY_FINANCE_BE_URI","value":"https://user:FAKE-SECRET-URI@finance-be.internal:8080/path"}],
   "secrets":[{"name":"ENROLLMENT_TRUST_KEY","valueFrom":"arn:aws:secretsmanager:ap-northeast-2:124495093425:secret:dev/carelog/enrollment-AbCdEf:key::"}],
   "mountPoints":[{"sourceVolume":"secrets","containerPath":"/run/secrets","readOnly":true}]}],
  "volumes":[{"name":"secrets","host":{"sourcePath":"/x"}}]}}
@@ -307,20 +324,21 @@ JSON
   grep -q 'finance-be.internal:8080' "$san" || fail 'hostname extraction'
   grep -q '비표준 값 생략' "$san" || fail 'non-standard flag value not masked'
   grep -q 'dev/carelog/enrollment-AbCdEf' "$san" || fail 'secret ref name'
+  jq -e '[.containers[0].env[].name] | index("DB_PASSWORD") == null' "$san" >/dev/null || fail 'non-allowlisted env name kept'
 
-  # 2) 항목 3: /run/secrets 경계 (/run/secretsXYZ 는 마운트 아님). 항목 5: sslrootcert 값 검사.
+  # 2) 항목 3: /run/secrets 경계. 항목 5: sslrootcert 값 검사 (hints는 원문 env 기준, 값 자체는 출력하지 않음).
   local td
   td='{"family":"f","revision":1,"containerDefinitions":[{"name":"c","image":"i","environment":[{"name":"SPRING_DATASOURCE_URL","value":"jdbc:postgresql://db.example:5432/app?sslrootcert=/run/rds-ca.pem"}],"mountPoints":[{"sourceVolume":"v","containerPath":"/run/secretsXYZ"}]}]}'
   jq -c "$SANITIZE" <<<"$td" >"$WORK/s1.json"
   jq -e '.containers[0].hints.secrets_mount == false and .containers[0].hints.sslrootcert_rds_ca == true and .containers[0].hints.rds_ca_mount == false' "$WORK/s1.json" >/dev/null || fail 'secrets mount boundary / sslrootcert=rds-ca hint'
-  td='{"family":"f","revision":1,"containerDefinitions":[{"name":"c","image":"i","environment":[{"name":"SPRING_DATASOURCE_URL","value":"jdbc:postgresql://db.example:5432/app?sslrootcert=/tmp/other.pem"},{"name":"PLATFORM_IDENTITY_AUTH_ENABLED","value":"TRUE"},{"name":"CARELOG_X_ENABLED","value":"yes"}],"mountPoints":[{"sourceVolume":"v","containerPath":"/run/rds-ca.pem"}]}]}'
+  td='{"family":"f","revision":1,"containerDefinitions":[{"name":"c","image":"i","environment":[{"name":"SPRING_DATASOURCE_URL","value":"jdbc:postgresql://db.example:5432/app?sslrootcert=/tmp/other.pem"},{"name":"PLATFORM_IDENTITY_AUTH_ENABLED","value":"TRUE"},{"name":"PLATFORM_GATEWAY_CARELOG_REGISTRATION_ENABLED","value":"yes"}],"mountPoints":[{"sourceVolume":"v","containerPath":"/run/rds-ca.pem"}]}]}'
   jq -c "$SANITIZE" <<<"$td" >"$WORK/s2.json"
   jq -e '.containers[0].hints.sslrootcert_rds_ca == false and .containers[0].hints.sslrootcert_env == true and .containers[0].hints.rds_ca_mount == true' "$WORK/s2.json" >/dev/null || fail 'sslrootcert other-path hint'
-  # 항목 2: 플래그 값은 대소문자 무시로 보존, 비표준 값은 마스킹
-  jq -e '.containers[0].env[1].value == "TRUE" and .containers[0].env[2].value == "<비표준 값 생략>"' "$WORK/s2.json" >/dev/null || fail 'flag value preservation / masking'
+  # 플래그 값: 대소문자 무시 보존("TRUE"), 비표준 값은 마스킹
+  jq -e '(.containers[0].env[] | select(.name == "PLATFORM_IDENTITY_AUTH_ENABLED") | .value) == "TRUE" and (.containers[0].env[] | select(.name == "PLATFORM_GATEWAY_CARELOG_REGISTRATION_ENABLED") | .value) == "<비표준 값 생략>"' "$WORK/s2.json" >/dev/null || fail 'flag value preservation / masking'
 
-  # 3) 항목 9 호스트 추출: userinfo·JDBC·구분자 주입에서 비밀 조각이 새지 않아야 한다. 기대값에 SEC가 없으므로 일치 검사가 곧 누출 검사다.
-  hostval() { jq -nc --arg v "$1" '{family:"f",revision:1,containerDefinitions:[{name:"c",image:"i",environment:[{name:"X_URI",value:$v}]}]}' | jq -c "$SANITIZE" | jq -r '.containers[0].env[0].value'; }
+  # 3) 호스트 추출 (실제 URI 이름 PLATFORM_GATEWAY_FINANCE_BE_URI). 기대값에 SEC가 없으므로 일치 검사가 곧 누출 검사다.
+  hostval() { jq -nc --arg v "$1" '{family:"f",revision:1,containerDefinitions:[{name:"c",image:"i",environment:[{name:"PLATFORM_GATEWAY_FINANCE_BE_URI",value:$v}]}]}' | jq -c "$SANITIZE" | jq -r '.containers[0].env[0].value'; }
   expect_host() { local got; got=$(hostval "$1"); [[ $got == "$2" ]] || fail "hostonly: input=[$1] got=[$got] want=[$2]"; }
   expect_host 'https://user:SEC1@SEC2@host.example:8443/x?y=SEC3' 'host.example:8443'
   expect_host 'https://user:SEC1@SEC2@host' 'host'
@@ -333,7 +351,13 @@ JSON
   expect_host 'jdbc:postgresql://db.internal:5432/carelog?password=SEC1' '<생략>'
   expect_host 'https://db.example:8443/x' 'db.example:8443'
 
-  # 4) 항목 8: 파싱 실패는 판정 불가로 기록 (누락 아님)
+  # 4) 레거시 이름은 실제 바인딩이 아니므로 존재로 치지 않는다 (alias 없음).
+  td='{"family":"f","revision":1,"containerDefinitions":[{"name":"gw","image":"i","environment":[{"name":"FINANCE_BE_URI","value":"https://legacy.example:8080"},{"name":"FINANCE_REFERENCE_ENABLED","value":"true"},{"name":"REDIS_TLS_ENABLED","value":"true"}],"secrets":[{"name":"PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_SERVICE_SECRET","valueFrom":"arn:aws:secretsmanager:ap-northeast-2:1:secret:dev/gw/trust"}]}]}'
+  jq -c "$SANITIZE" <<<"$td" >"$WORK/legacy.json"
+  jq -e '[.containers[0].env[].name] | (index("FINANCE_BE_URI") == null and index("FINANCE_REFERENCE_ENABLED") == null and index("REDIS_TLS_ENABLED") == null)' "$WORK/legacy.json" >/dev/null || fail 'legacy names kept in sanitized output'
+  jq -c '.containers' "$WORK/legacy.json" >"$WORK/legacy-containers.json"
+
+  # 5) 항목 8: 파싱 실패는 판정 불가로 기록 (누락 아님)
   printf '{not json' >"$WORK/bad.json"
   : >"$WORK/emit.ndjson"
   emit_td "$WORK/bad.json" dev-shared dev-carelog "$WORK/emit.ndjson"
@@ -344,23 +368,23 @@ JSON
   emit_td "$WORK/ok.json" dev-shared dev-core "$WORK/emit2.ndjson"
   grep -q '"taskdef":{' "$WORK/emit2.ndjson" && ! grep -q parse_failed "$WORK/emit2.ndjson" || fail 'valid task definition emitted as failure'
 
-  # 5) 판정 규칙: 합성 요약 기준선 (모든 항목 확인됨이어야 함)
+  # 6) 판정 규칙: 합성 요약 기준선 (실제 바인딩 이름 사용, 모든 항목 확인됨이어야 함)
   cat >"$base" <<'JSON'
 {"services":[
   {"cluster":"dev-shared","service":"dev-carelog","taskdef":{"family":"f","revision":1,"volumes":[],"containers":[
     {"name":"carelog","image":"i","digest":null,"env_files":0,
-     "env":[{"name":"VALKEY_TLS_ENABLED","value":"true"},{"name":"CARELOG_IDENTITY_ENROLLMENT_ENABLED","value":"true"},{"name":"CARELOG_INTERNAL_IDENTITY_CLAIMS_ENABLED","value":"True"},{"name":"SPRING_DATASOURCE_URL","value":"<생략>"}],
+     "env":[{"name":"VALKEY_TLS_ENABLED","value":"true"},{"name":"CARELOG_IDENTITY_ENROLLMENT_ENABLED","value":"true"},{"name":"CARELOG_INTERNAL_IDENTITY_CLAIMS_ENABLED","value":"True"}],
      "secrets":[{"name":"CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET","ref":"dev/carelog/enroll"},{"name":"CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET","ref":"dev/carelog/claims"}],
      "mounts":[{"volume":"secrets","path":"/run/secrets","ro":true},{"volume":"rdsca","path":"/run/rds-ca.pem","ro":true}],
      "hints":{"secrets_mount":true,"rds_ca_mount":true,"sslrootcert_env":true,"sslrootcert_rds_ca":true}}]}},
   {"cluster":"dev-shared","service":"dev-core","taskdef":{"containers":[
     {"name":"core","env_files":0,
-     "env":[{"name":"SPRING_PROFILES_ACTIVE","value":"dev"},{"name":"PLATFORM_IDENTITY_AUTH_ENABLED","value":"true"},{"name":"FINANCE_REFERENCE_ENABLED","value":"true"},{"name":"FINANCE_SIGNUP","value":"true"},{"name":"FINANCE_DEV_DUAL_AUTH","value":"true"},{"name":"REDIS_TLS_ENABLED","value":"true"}],
+     "env":[{"name":"SPRING_PROFILES_ACTIVE","value":"dev"},{"name":"PLATFORM_IDENTITY_AUTH_ENABLED","value":"true"},{"name":"PLATFORM_IDENTITY_FINANCE_REFERENCE_ENABLED","value":"true"},{"name":"PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED","value":"true"},{"name":"PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED","value":"true"},{"name":"PLATFORM_IDENTITY_REDIS_TLS_ENABLED","value":"true"}],
      "secrets":[{"name":"PLATFORM_IDENTITY_CARELOG_ENROLLMENT_CREDENTIAL","ref":"x"},{"name":"PLATFORM_IDENTITY_PRODUCT_CLAIMS_SERVICE_SECRET","ref":"y"}],
      "mounts":[],"hints":{}}]}},
   {"cluster":"dev-shared","service":"dev-gateway","taskdef":{"containers":[
     {"name":"gw","env_files":0,
-     "env":[{"name":"FINANCE_BE_URI","value":"finance-be.internal:8080"},{"name":"FINANCE_REFERENCE_ENABLED","value":"TRUE"},{"name":"REDIS_TLS_ENABLED","value":"true"}],
+     "env":[{"name":"PLATFORM_GATEWAY_FINANCE_BE_URI","value":"finance-be.internal:8080"},{"name":"PLATFORM_GATEWAY_FINANCE_REFERENCE_ENABLED","value":"TRUE"},{"name":"PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_ENABLED","value":"true"},{"name":"PLATFORM_GATEWAY_CARELOG_REGISTRATION_ENABLED","value":"false"},{"name":"PLATFORM_GATEWAY_REDIS_TLS_ENABLED","value":"true"}],
      "secrets":[{"name":"PLATFORM_GATEWAY_FINANCE_TRUSTED_CONTEXT_SERVICE_SECRET","ref":"z"}],"mounts":[],"hints":{}}]}}
 ],
 "elasticache":[{"kind":"replication-group","id":"dev-shared-valkey","transit_encryption":true,"mode":"required","status":"available"}],
@@ -377,9 +401,12 @@ JSON
     if ! jq "$2" "$base" >"$m" || ! jq -r "$EVAL" "$m" >"$mrep"; then fail "$1: render"; return; fi
     grep -F "| $3 |" "$mrep" | grep -qF -- "$4" || fail "$1: row $3 want [$4]"
   }
-  # 항목 2: 플래그 false는 누락 + 값=false
-  mut flag-false '.services[1].taskdef.containers[0].env |= map(if .name == "PLATFORM_IDENTITY_AUTH_ENABLED" then .value = "false" else . end)' 3 '누락 (PLATFORM_IDENTITY_AUTH_ENABLED 값=false)'
-  mut flag-false-gw-case '.services[2].taskdef.containers[0].env |= map(if .name == "FINANCE_REFERENCE_ENABLED" then .value = "False" else . end)' 4 '누락 (FINANCE_REFERENCE_ENABLED 값=False)'
+  # 실제 이름의 플래그 false -> 누락 + 값=false
+  mut core-auth-false '.services[1].taskdef.containers[0].env |= map(if .name == "PLATFORM_IDENTITY_AUTH_ENABLED" then .value = "false" else . end)' 3 '누락 (PLATFORM_IDENTITY_AUTH_ENABLED 값=false)'
+  mut core-signup-false '.services[1].taskdef.containers[0].env |= map(if .name == "PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED" then .value = "false" else . end)' 3 '누락 (PLATFORM_IDENTITY_FINANCE_REFERENCE_SIGNUP_ENABLED 값=false)'
+  mut core-devdual-false '.services[1].taskdef.containers[0].env |= map(if .name == "PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED" then .value = "false" else . end)' 3 '누락 (PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED 값=false)'
+  mut gw-reference-false '.services[2].taskdef.containers[0].env |= map(if .name == "PLATFORM_GATEWAY_FINANCE_REFERENCE_ENABLED" then .value = "false" else . end)' 4 '누락 (PLATFORM_GATEWAY_FINANCE_REFERENCE_ENABLED 값=false)'
+  mut gw-reference-upper-true '.services[2].taskdef.containers[0].env |= map(if .name == "PLATFORM_GATEWAY_FINANCE_REFERENCE_ENABLED" then .value = "TRUE" else . end)' 4 '| 확인됨 |'
   # 항목 7: SPRING_PROFILES_ACTIVE 정확 매칭 (devx는 dev 아님, prod,dev는 dev 포함)
   mut profile-devx '.services[1].taskdef.containers[0].env |= map(if .name == "SPRING_PROFILES_ACTIVE" then .value = "devx" else . end)' 3 '누락 (SPRING_PROFILES_ACTIVE 값=devx)'
   mut profile-comma '.services[1].taskdef.containers[0].env |= map(if .name == "SPRING_PROFILES_ACTIVE" then .value = "prod,dev" else . end)' 3 '| 확인됨 |'
@@ -399,6 +426,15 @@ JSON
   mut parse-fail-row2 '.services[0] = {cluster:"dev-shared", service:"dev-carelog", taskdef:null, parse_failed:true}' 2 '판정 불가(파싱 실패)'
   mut fetch-fail '.services[0] = {cluster:"dev-shared", service:"dev-carelog", taskdef:null, fetch_failed:true}' 1 '판정 불가(조회 실패)'
 
+  # 레거시 이름 negative: 실제 sanitizer 출력(legacy-containers)을 gateway 자리에 넣으면 누락이어야 하고, 레거시 값은 근거에도 없어야 한다.
+  if ! jq --slurpfile lc "$WORK/legacy-containers.json" '.services[2].taskdef.containers = $lc[0]' "$base" >"$m" || ! jq -r "$EVAL" "$m" >"$mrep"; then
+    fail 'legacy render'
+  else
+    grep -F '| 4 |' "$mrep" | grep -qF '| 누락 |' || fail 'legacy name treated as present (row 4 not 누락)'
+    grep -qF 'legacy.example' "$mrep" && fail 'legacy value leaked into report'
+    grep -qE '(^|[ ,(])FINANCE_REFERENCE_ENABLED=' "$mrep" && fail 'legacy flag shown in report'
+  fi
+
   # 권한 부족 목록 렌더링
   jq '.denied = ["ecs:ListServices on cluster x"]' "$base" >"$m" && jq -r "$EVAL" "$m" >"$mrep"
   grep -qF -- '- 권한 부족: ecs:ListServices on cluster x' "$mrep" || fail 'denied list rendering'
@@ -413,7 +449,7 @@ JSON
     exit 1
   fi
   cat "$rep"
-  echo 'selftest OK: 비밀 문자열 미출력, 판정 규칙 및 파싱 실패 처리 확인'
+  echo 'selftest OK: 실제 바인딩 이름 판정, 레거시 이름 비인정, 비밀 미출력, 파싱 실패 처리 확인'
 }
 
 case ${1:-} in
