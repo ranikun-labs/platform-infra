@@ -30,6 +30,8 @@ server {
 upstream carelog_app {
     server 127.0.0.1:8080;
     keepalive 8;
+    # Idle upstream connections close before Tomcat's own 60s keep-alive, so nginx never reuses a socket Tomcat has closed.
+    keepalive_timeout 30s;
 }
 
 # No path and no query string in the log (both can carry identifiers). Status and timing only.
@@ -48,6 +50,8 @@ server {
     access_log /dev/stdout carelog_tls;
     default_type application/json;
     error_page 403 = @deny;
+    error_page 413 = @toolarge;
+    error_page 421 = @misdirected;
 
     # Timeouts are explicit. The app answers enrollment and claims well inside 60s; a stalled upstream is cut at 60s.
     proxy_connect_timeout 5s;
@@ -61,20 +65,31 @@ server {
         return 403 '{"error":"forbidden"}';
     }
 
+    location @toolarge {
+        internal;
+        return 413 '{"error":"payload_too_large"}';
+    }
+
+    location @misdirected {
+        internal;
+        return 421 '{"error":"misdirected"}';
+    }
+
     # Path-only deny on the raw request target. "^[^?]*" limits every alternative to the path, so the query string
     # is never inspected. Alternatives:
     #   %      any percent-encoding in the path. Covers %2e %2f %3b %5c %00 %0a %0d %25. $uri is decoded before matching.
     #   ;      path parameters (Tomcat strips them, the proxy must not).
+    #   #      fragment delimiter. Never valid in a request target, so it is refused rather than trimmed.
     #   \x5c   backslash.
     #   ..     dot segments anywhere.   /./  and a trailing /.  current-segment.
     #   //     empty segments (merge_slashes is off, so they are not collapsed).
-    if ($request_uri ~ "^[^?]*(%|;|\x5c|\.\.|/\./|/\.(\?|\z)|//)") {
+    if ($request_uri ~ "^[^?]*(%|;|#|\x5c|\.\.|/\./|/\.(\?|\z)|//)") {
         return 403;
     }
 
     # Host must be the expected DNS name. $host is lower-case and has no port, so the JDK's "host:8443" matches.
     if ($host != "__TLS_EXPECTED_DNS_SAN__") {
-        return 421 '{"error":"misdirected"}';
+        return 421;
     }
 
     # Core enrollment. accountId is a UUID (EnrollmentController: @PathVariable UUID). \z, not $: $ also matches

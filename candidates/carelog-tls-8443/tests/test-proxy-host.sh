@@ -188,9 +188,23 @@ check "trailing slash denied" 403 $TLS -X PUT "https://$SAN:8443$ENROLL/"
 check "encoded internal segment denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/%69nternal/v1/identity/carelog/enrollments/$UUID"
 check "UUID then %0a denied" 403 $TLS -X PUT -H "$AUTH" "https://$SAN:8443$ENROLL%0a"
 check "UUID then %0d denied" 403 $TLS -H "$CORE_HDR" "https://$SAN:8443$CLAIMS%0d"
+check "fragment # in path denied" 403 $TLS --request-target "$CLAIMS#x" "https://$SAN:8443/"
 check "UUID then %25 denied" 403 $TLS -H "$CORE_HDR" "https://$SAN:8443$CLAIMS%25"
 check "encoded %00 in path refused by nginx parser (400, never reaches app)" 400 $TLS -H "$CORE_HDR" "https://$SAN:8443$CLAIMS%00"
 check_deny_json "403 carries JSON body" $TLS "https://$SAN:8443/api/v1/users/user-id/x"
+check_json_ct() {  # name want-code want-content-type curl-args...  (status and content type, body must be JSON)
+  name=$1; want=$2; wct=$3; shift 3
+  rm -f "$WORK/body"
+  got=$(curl --noproxy '*' --path-as-is -s -o "$WORK/body" -w '%{http_code} %{content_type}' "$@" 2>/dev/null || true)
+  if [ "$got" = "$want $wct" ] && jq -e . "$WORK/body" >/dev/null 2>&1; then
+    PASSES=$((PASSES + 1)); log "PASS [$name] $got body=$(tr -d '\n' < "$WORK/body")"
+  else
+    FAILS=$((FAILS + 1)); log "FAIL [$name] want='$want $wct' got='$got' body=$(head -c 120 "$WORK/body" | tr -d '\n')"
+  fi
+}
+BIG=$(head -c 5000 /dev/zero | tr '\0' a)
+check_json_ct "body over 4k -> 413 JSON" 413 application/json $TLS -X PUT -H "$AUTH" -H "$JSON_CT" -d "$BIG" "https://$SAN:8443$ENROLL"
+check_json_ct "Host mismatch -> 421 JSON" 421 application/json $TLS -X PUT -H "$AUTH" -H "$JSON_CT" -H "Host: other.test.internal" -d '{}' "https://$SAN:8443$ENROLL"
 
 log "-- 8443 Host and transport"
 check "Host other name -> 421" 421 $TLS -X PUT -H "$AUTH" -H "$JSON_CT" -H "Host: other.test.internal" -d '{}' "https://$SAN:8443$ENROLL"
