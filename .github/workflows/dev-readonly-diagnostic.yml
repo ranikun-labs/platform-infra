@@ -2,19 +2,9 @@ name: DEV read-only diagnostic
 
 # One-off, read-only evidence collection for DEV (ECS task definition env/secret names, ElastiCache TLS, RDS force_ssl).
 # Only AWS read APIs are called (scripts/diag/dev-readonly-diagnostic.sh). No Terraform, no secret values, no writes.
-#
-# Usability probe: this job intentionally does NOT require github.ref == refs/heads/main (dev-shared-plan.yml does).
-# Whether the OIDC role ranikun-dev-shared-plan accepts a non-main ref depends on its trust policy
-# (sub claim / job_workflow_ref). If the role trust is restricted to main, configure-aws-credentials fails with
-# "Not authorized to perform sts:AssumeRoleWithWebIdentity" and the run is recorded as a trust mismatch.
-# Trigger is limited to this diagnostic branch (push) and manual dispatch; nothing else runs it.
+# Trigger: workflow_dispatch only. The job additionally requires refs/heads/main.
 
 on:
-  push:
-    branches: [claude/great-heisenberg-u3i75y-dev-diag]
-    paths:
-      - .github/workflows/dev-readonly-diagnostic.yml
-      - scripts/diag/dev-readonly-diagnostic.sh
   workflow_dispatch:
 
 permissions: {}
@@ -25,7 +15,7 @@ concurrency:
 
 jobs:
   diagnostic:
-    if: github.repository == 'ranikun-labs/platform-infra'
+    if: github.repository == 'ranikun-labs/platform-infra' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: dev-plan
     permissions:
