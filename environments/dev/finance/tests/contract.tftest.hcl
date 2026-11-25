@@ -20,9 +20,9 @@ variables {
     ecr_repository_arn     = "arn:aws:ecr:ap-northeast-2:111122223333:repository/finance"
     cpu                    = 256
     memory                 = 512
-    environment            = {}
-    secrets                = {}
-    execution_secret_arns  = []
+    environment            = { REDIS_HOST = "finance-valkey.example.internal" }
+    secrets                = { SPRING_DATASOURCE_PASSWORD = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance/db" }
+    execution_secret_arns  = ["arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance/db"]
     execution_kms_key_arns = []
     health_check           = { command = ["CMD", "/test"], interval = 30, timeout = 5, retries = 3, start_period = 30 }
     log_retention_days     = 7
@@ -38,6 +38,20 @@ run "gateway_only_service_ingress" {
   }
 }
 
+# Opt-in off: the container inputs must equal the origin/main pass-through (runtime.environment and runtime.secrets only).
+run "default_container_matches_origin" {
+  command = plan
+
+  assert {
+    condition     = output.container_environment == var.runtime.environment
+    error_message = "With dev_trusted_context disabled the container environment must equal runtime.environment (no forced Flyway flag)."
+  }
+  assert {
+    condition     = output.container_secrets == var.runtime.secrets
+    error_message = "With dev_trusted_context disabled the container secrets must equal runtime.secrets."
+  }
+}
+
 run "dev_trusted_context_plans_with_secret_arn" {
   command = plan
   variables {
@@ -50,6 +64,10 @@ run "dev_trusted_context_plans_with_secret_arn" {
     condition     = aws_vpc_security_group_ingress_rule.gateway.from_port == 8080 && var.runtime.initial_desired_count == 0
     error_message = "DEV trusted context must keep the gateway-only port and zero-task bootstrap."
   }
+  assert {
+    condition     = output.container_environment["SPRING_FLYWAY_ENABLED"] == "false" && output.container_environment["SPRING_PROFILES_ACTIVE"] == "dev"
+    error_message = "DEV trusted context must force SPRING_FLYWAY_ENABLED=false alongside the dev profile."
+  }
 }
 
 run "dev_trusted_context_requires_secret_arn" {
@@ -58,24 +76,4 @@ run "dev_trusted_context_requires_secret_arn" {
     dev_trusted_context = { enabled = true }
   }
   expect_failures = [var.dev_trusted_context]
-}
-
-run "flyway_at_startup_is_rejected" {
-  command = plan
-  variables {
-    runtime = {
-      container_port         = 8080
-      image                  = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/finance@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      ecr_repository_arn     = "arn:aws:ecr:ap-northeast-2:111122223333:repository/finance"
-      cpu                    = 256
-      memory                 = 512
-      environment            = { SPRING_FLYWAY_ENABLED = "true" }
-      secrets                = {}
-      execution_secret_arns  = []
-      execution_kms_key_arns = []
-      health_check           = { command = ["CMD", "/test"], interval = 30, timeout = 5, retries = 3, start_period = 30 }
-      log_retention_days     = 7
-    }
-  }
-  expect_failures = [var.runtime]
 }

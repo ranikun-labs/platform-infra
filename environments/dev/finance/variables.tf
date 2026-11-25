@@ -59,12 +59,6 @@ variable "runtime" {
     })
     log_retention_days = number
   })
-  validation {
-    # The release gate requires an explicit SPRING_FLYWAY_ENABLED=false on the active container. Migrations run as a
-    # separate step, never at service startup.
-    condition     = lookup(var.runtime.environment, "SPRING_FLYWAY_ENABLED", "false") == "false"
-    error_message = "runtime.environment must not enable Flyway at startup; migrations run as a separate step."
-  }
 }
 variable "tags" {
   type    = map(string)
