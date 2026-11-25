@@ -70,3 +70,27 @@ variable "assign_public_ip" {
   type    = bool
   default = false
 }
+
+variable "volume_names" {
+  description = "Ephemeral task-level volumes. Empty keeps the task definition unchanged."
+  type        = set(string)
+  default     = []
+}
+
+variable "app_mount_points" {
+  description = "Mount points for the application container; each source_volume must be in volume_names. Empty keeps the container definition unchanged."
+  type = list(object({
+    source_volume  = string
+    container_path = string
+    read_only      = optional(bool, true)
+  }))
+  default = []
+  validation {
+    condition     = alltrue([for m in var.app_mount_points : contains(var.volume_names, m.source_volume)])
+    error_message = "Every app mount point must reference a volume declared in volume_names."
+  }
+  validation {
+    condition     = alltrue([for m in var.app_mount_points : startswith(m.container_path, "/")])
+    error_message = "Mount container_path must be absolute."
+  }
+}

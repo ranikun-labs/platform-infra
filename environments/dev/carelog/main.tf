@@ -1,3 +1,19 @@
+locals {
+  # carelog-be prod profile contract for DEV. These win over runtime.environment.
+  # Sources: application-prod.yml, EnrollmentController (@ConditionalOnProperty
+  # carelog.identity.enrollment.enabled), InternalIdentityClaimsController.
+  fixed_environment = {
+    SPRING_PROFILES_ACTIVE                   = "prod"
+    CARELOG_ENVIRONMENT                      = "dev"
+    CARELOG_FLYWAY_ENABLED                   = "false"
+    SPRING_FLYWAY_ENABLED                    = "false"
+    VALKEY_TLS_ENABLED                       = "true"
+    CARELOG_IDENTITY_ENROLLMENT_ENABLED      = "true"
+    CARELOG_INTERNAL_IDENTITY_CLAIMS_ENABLED = "true"
+  }
+  runtime_config_volume = "runtime-config"
+}
+
 module "service" {
   source                    = "../../../modules/ecs-service"
   region                    = var.region
@@ -13,7 +29,7 @@ module "service" {
   cpu                       = var.runtime.cpu
   memory                    = var.runtime.memory
   desired_count             = var.runtime.initial_desired_count
-  environment               = var.runtime.environment
+  environment               = merge(var.runtime.environment, local.fixed_environment)
   secrets                   = var.runtime.secrets
   execution_secret_arns     = var.runtime.execution_secret_arns
   execution_kms_key_arns    = var.runtime.execution_kms_key_arns
@@ -21,8 +37,16 @@ module "service" {
   first_task_definition_arn = var.runtime.first_task_definition_arn
   health_check              = var.runtime.health_check
   log_retention_days        = var.runtime.log_retention_days
-  tags                      = var.tags
+  volume_names              = var.runtime_config_mount ? toset([local.runtime_config_volume]) : toset([])
+  app_mount_points = var.runtime_config_mount ? [{
+    source_volume  = local.runtime_config_volume
+    container_path = "/run/secrets"
+    read_only      = true
+  }] : []
+  tags = var.tags
 }
+
+# Gateway reaches carelog on the product port (unchanged).
 resource "aws_vpc_security_group_ingress_rule" "gateway" {
   security_group_id            = module.service.security_group_id
   referenced_security_group_id = var.gateway_security_group_id
@@ -30,4 +54,16 @@ resource "aws_vpc_security_group_ingress_rule" "gateway" {
   from_port                    = var.runtime.container_port
   to_port                      = var.runtime.container_port
   description                  = "Gateway to carelog"
+}
+
+# Core calls carelog enrollment (PUT) and internal claims (GET) on the product port.
+# Each endpoint is separately guarded by its own bearer secret in the application.
+resource "aws_vpc_security_group_ingress_rule" "core" {
+  count                        = var.core_security_group_id == null ? 0 : 1
+  security_group_id            = module.service.security_group_id
+  referenced_security_group_id = var.core_security_group_id
+  ip_protocol                  = "tcp"
+  from_port                    = var.runtime.container_port
+  to_port                      = var.runtime.container_port
+  description                  = "Core to carelog enrollment and claims"
 }

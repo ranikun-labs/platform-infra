@@ -99,8 +99,14 @@ resource "aws_ecs_task_definition" "baseline" {
   execution_role_arn       = aws_iam_role.execution.arn
   task_role_arn            = aws_iam_role.app.arn
   skip_destroy             = true
+  dynamic "volume" {
+    for_each = var.volume_names
+    content {
+      name = volume.value
+    }
+  }
   lifecycle { create_before_destroy = true }
-  container_definitions = jsonencode(concat([{
+  container_definitions = jsonencode(concat([merge({
     name             = var.name
     image            = var.image
     essential        = true
@@ -110,7 +116,9 @@ resource "aws_ecs_task_definition" "baseline" {
     secrets          = [for key in sort(keys(var.secrets)) : { name = key, valueFrom = var.secrets[key] }]
     healthCheck      = { command = var.health_check.command, interval = var.health_check.interval, timeout = var.health_check.timeout, retries = var.health_check.retries, startPeriod = var.health_check.start_period }
     logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.service.name, awslogs-region = var.region, awslogs-stream-prefix = "app" } }
-    }], var.cloudflared == null ? [] : [{
+    }, length(var.app_mount_points) == 0 ? {} : {
+    mountPoints = [for m in var.app_mount_points : { sourceVolume = m.source_volume, containerPath = m.container_path, readOnly = m.read_only }]
+    })], var.cloudflared == null ? [] : [{
     name      = "cloudflared"
     image     = var.cloudflared.image
     essential = true
