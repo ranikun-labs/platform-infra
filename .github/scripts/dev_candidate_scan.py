@@ -64,6 +64,15 @@ IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 HEREDOC_MARKER_RE = re.compile(r"-?[ \t]*([^ \t\r\n]*)")
 COMMENT_MARK_RE = re.compile(r"#|//|/\*")
 
+# Every block whose keyword we care about. The keyword is a plain identifier, so it cannot be
+# escaped; only the labels can. Each header line is validated, so a label that Terraform would
+# decode (for example "terraform_remote_state") cannot hide the block from the rules below.
+HEADER_RE = re.compile(
+    r'(?<![\w.\-])(module|data|resource|provider|provisioner|backend|ephemeral|import|removed|check'
+    r'|moved|cloud|terraform|locals|variable|output|dynamic|lifecycle|connection|required_providers'
+    r'|provider_meta|precondition|postcondition|experiments)(?=[\s"{])([^\n{]*)\{')
+LABEL_TOKEN_RE = re.compile(r'"[A-Za-z_][A-Za-z0-9_-]*"|[A-Za-z_][A-Za-z0-9_-]*')
+
 
 def line_of(text, pos):
     return text.count("\n", 0, pos) + 1
@@ -236,6 +245,17 @@ class Scan:
             if not IDENT_RE.fullmatch(marker):
                 flag_at(m, "heredoc marker must be a plain identifier")
 
+        # Header validation for every block keyword the rules use. Any backslash or non-plain
+        # label fails closed; ephemeral blocks are denied outright (main has none).
+        for m in HEADER_RE.finditer(text):
+            keyword, rest = m.group(1), m.group(2)
+            if keyword == "ephemeral":
+                flag_at(m, "ephemeral block not allowed")
+            elif "\\" in rest:
+                flag_at(m, f"unrecognized header for {keyword!r}: backslash in header not allowed")
+            elif any(not LABEL_TOKEN_RE.fullmatch(tok) for tok in rest.split()):
+                flag_at(m, f"unrecognized header for {keyword!r}: labels must be plain or quoted identifiers")
+
         for m in CLOUD_RE.finditer(text):
             flag_at(m, "cloud block not allowed")
         for m in FILE_FN_RE.finditer(text):
@@ -251,6 +271,9 @@ class Scan:
                 self.flag(path, line, "module source must be exactly one literal string")
                 continue
             src = lits[0]
+            if "\\" in src:
+                self.flag(path, line, "module source with backslash escape not allowed")
+                continue
             if not src.startswith(("./", "../")):
                 self.flag(path, line, "non-local module source not allowed")
                 continue

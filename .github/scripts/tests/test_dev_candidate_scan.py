@@ -377,6 +377,60 @@ class ScanTests(unittest.TestCase):
         rc, text = scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl))
         self.assertEqual(rc, 0, text)
 
+    # --- round 5: \uXXXX and other escapes in block labels, ephemeral blocks ---
+
+    def test_unicode_escape_in_data_label_rejected(self):
+        # Terraform decodes t to "t", so this is terraform_remote_state; the header must fail.
+        hcl = 'data "\\u0074erraform_remote_state" "x" {\n  backend = "http"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "unrecognized header for 'data'")
+
+    def test_unicode_escape_in_data_name_rejected(self):
+        hcl = 'data "aws_s3_bucket" "b\\u0031" {\n  bucket = "x"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "unrecognized header for 'data'")
+
+    def test_unicode_escape_in_module_label_rejected(self):
+        hcl = 'module "\\u0078" {\n  source = "../../../modules/x"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "unrecognized header for 'module'")
+
+    def test_unicode_escape_in_provider_label_rejected(self):
+        hcl = 'provider "\\u0061ws" {\n  region = "ap-northeast-2"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "unrecognized header for 'provider'")
+
+    def test_unicode_escape_in_resource_label_rejected(self):
+        hcl = 'resource "aws_s3_bucket" "b\\u0031" {\n  bucket = "x"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "unrecognized header for 'resource'")
+
+    def test_unicode_escape_in_resource_type_rejected(self):
+        hcl = 'resource "\\u0074erraform_data" "x" {}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "unrecognized header for 'resource'")
+
+    def test_backslash_in_header_rejected(self):
+        hcl = 'data "aws_s3_bucket" "b\\\\x" {\n  bucket = "x"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "backslash in header not allowed")
+
+    def test_ephemeral_block_rejected(self):
+        hcl = 'ephemeral "aws_secretsmanager_secret_version" "x" {\n  secret_id = "x"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "ephemeral block not allowed")
+
+    def test_module_source_with_backslash_escape_rejected(self):
+        hcl = 'module "x" {\n  source = "../../../modules/\\u0078"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "module source with backslash escape not allowed")
+
+    def test_plain_quoted_and_bare_labels_still_pass(self):
+        hcl = ('data aws_caller_identity current {}\n'
+               'resource "aws_s3_bucket" "b-2" {\n  bucket = "x"\n}\n')
+        rc, text = scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl))
+        self.assertEqual(rc, 0, text)
+
     def test_unquoted_provider_other_than_aws_rejected(self):
         self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", "provider http {}\n")),
                          "provider 'http' not allowed")

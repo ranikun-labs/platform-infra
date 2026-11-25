@@ -19,10 +19,18 @@ name: DEV signup-off plan (read-only)
 #   at most one run waits. A newer run queued while another is waiting REPLACES (cancels) the
 #   waiting run, so a queued run can disappear without a result. Check the run that actually
 #   completed; re-dispatch if the one you wanted was replaced.
-# - Egress: no runtime egress filter yet. step-security/harden-runner (block mode, allowlist of
-#   AWS STS/S3/regional endpoints, registry.terraform.io, releases.hashicorp.com and GitHub
-#   Actions endpoints) is NOT added because its full commit SHA could not be verified here and
-#   the allowlist cannot be exercised without a live run. Tracked as a follow-up.
+# - MANDATORY PRECONDITION before the first SHA is added to the allowlist below. Candidate code
+#   runs with DEV-scoped plan credentials, so these controls are the real security boundary:
+#   1. Egress block-mode filter on every job that runs candidate code, allowing only AWS
+#      STS/S3/regional endpoints, registry.terraform.io, releases.hashicorp.com and the GitHub
+#      Actions endpoints. Not yet added: step-security/harden-runner needs a full commit SHA that
+#      could not be verified here, and its allowlist needs a live run to validate.
+#   2. Plan role (ranikun-dev-shared-plan) IAM Resource scoped to the owning account
+#      (124495093425) with an aws:ResourceAccount condition, plus an S3 endpoint policy limiting
+#      access to that account.
+#   Scanner note: dev_candidate_scan.py is a secondary mistake-catcher, not a security boundary.
+#   It approximates HCL with regular expressions and cannot be proven complete. Do not rely on
+#   it to contain a malicious candidate.
 
 on:
   workflow_dispatch:
@@ -46,7 +54,9 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'candidate_sha must be a full 40-character lowercase SHA' >&2; exit 1; }
-          # Reviewed SHAs only. Adding a SHA gives that code DEV credentials; review of the SHA is the final control.
+          # MANDATORY: do not add the first SHA until the egress filter and IAM scoping described in the
+          # header's MANDATORY PRECONDITION are in place. Adding a SHA gives that code DEV credentials.
+          # Reviewed SHAs only; review of the SHA is a control, not the boundary.
           # Empty means fail closed until an owner adds the reviewed full SHA here.
           allowed=(
           )
