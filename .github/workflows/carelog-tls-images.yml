@@ -1,0 +1,88 @@
+name: carelog TLS images (build and test, no push)
+
+# Builds the front proxy and trust-init images and runs the candidate tests. Nothing is pushed to a registry, no AWS
+# credentials are used, and the Core base is a public stand-in (the real Core digest is not published yet).
+
+on:
+  push:
+    branches:
+      - claude/great-heisenberg-u3i75y-dev-tls-images
+    paths:
+      - candidates/carelog-tls-8443/**
+      - .github/workflows/carelog-tls-images.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: carelog-tls-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SRC: candidates/carelog-tls-8443
+      # Public stand-in for the Core base (eclipse-temurin 17 JRE, alpine). Stands in for the Core digest only.
+      STANDIN_CORE_IMAGE: eclipse-temurin@sha256:2b4113ae80e31f103b284dd3bc3e008add670cf8555417b5b289fa1128f2f0a3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Generate throwaway test PKI (not committed, not published)
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/pki"
+          sh "$SRC/tests/gen-material.sh" "$RUNNER_TEMP/pki"
+
+      - name: Build front proxy image (buildx, load, no push)
+        run: |
+          set -eu
+          docker buildx build --load \
+            --build-arg SOURCE_SHA="$GITHUB_SHA" \
+            -t "carelog-tls-proxy:$GITHUB_SHA" \
+            "$SRC/proxy"
+
+      - name: Build trust-init image on the stand-in base (no push)
+        run: |
+          set -eu
+          CORE_IMAGE="$STANDIN_CORE_IMAGE" \
+          CA_BUNDLE="$RUNNER_TEMP/pki/ca-bundle.pem" \
+          SOURCE_SHA="$GITHUB_SHA" \
+            sh "$SRC/build/build-images.sh"
+
+      - name: nginx -t on the rendered template inside the built image
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/conf" "$RUNNER_TEMP/certs"
+          sed -e 's|__TASK_IPV4__|127.0.0.2|g' \
+              -e 's|__TLS_DIR__|/certs|g' \
+              -e 's|__TLS_EXPECTED_DNS_SAN__|carelog-dev.test.internal|g' \
+              "$SRC/proxy/nginx.conf.template" > "$RUNNER_TEMP/conf/default.conf"
+          cp "$RUNNER_TEMP/pki/good.crt" "$RUNNER_TEMP/certs/server.crt"
+          cp "$RUNNER_TEMP/pki/good.key" "$RUNNER_TEMP/certs/server.key"
+          docker run --rm --entrypoint nginx \
+            -v "$RUNNER_TEMP/conf/default.conf:/etc/nginx/conf.d/default.conf:ro" \
+            -v "$RUNNER_TEMP/certs:/certs:ro" \
+            "carelog-tls-proxy:$GITHUB_SHA" -t
+
+      - name: trust-init on the public root (store grows by one, no key)
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/trust"
+          docker run --rm \
+            -v "$RUNNER_TEMP/trust:/run/carelog-trust" \
+            "carelog-trust-init:$GITHUB_SHA"
+          test -s "$RUNNER_TEMP/trust/cacerts"
+          ls -l "$RUNNER_TEMP/trust/cacerts"
+
+      - name: Full candidate test suite in the proxy image
+        run: |
+          set -eu
+          docker run --rm --entrypoint sh \
+            -v "$GITHUB_WORKSPACE:/work" \
+            "carelog-tls-proxy:$GITHUB_SHA" \
+            /work/candidates/carelog-tls-8443/tests/container-run.sh
