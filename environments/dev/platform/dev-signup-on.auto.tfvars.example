@@ -3,6 +3,7 @@
 # Origins are scheme, host and port only (https required). Every value is a placeholder; secrets are ARNs only.
 # The base file must also provide the dual-auth runtime keys (see services.tf validations).
 
+# Must equal carelog output carelog_private_https_origin (<service_name>.<namespace_name>:8443). Same namespace as namespace_name.
 carelog_enrollment_origin = "https://ranikun-carelog-dev-api.REPLACE.internal:8443"
 carelog_claims_origin     = "https://ranikun-carelog-dev-api.REPLACE.internal:8443"
 

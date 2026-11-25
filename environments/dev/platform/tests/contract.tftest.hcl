@@ -126,8 +126,8 @@ run "default_containers_match_origin" {
 run "dev_dual_auth_enabled_plans_with_secret_arns" {
   command = plan
   variables {
-    carelog_enrollment_origin = "https://carelog.dev.internal"
-    carelog_claims_origin     = "https://carelog.dev.internal"
+    carelog_enrollment_origin = "https://dev-carelog.dev.internal:8443"
+    carelog_claims_origin     = "https://dev-carelog.dev.internal:8443"
     core_truststore = {
       trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
@@ -171,11 +171,11 @@ run "dev_dual_auth_enabled_plans_with_secret_arns" {
     error_message = "DEV dual-auth must plan both services with the same Core and Gateway topology."
   }
   assert {
-    condition     = output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"] == "https://carelog.dev.internal" && output.core_container_environment["PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL"] == "https://carelog.dev.internal"
+    condition     = output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"] == "https://dev-carelog.dev.internal:8443" && output.core_container_environment["PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL"] == "https://dev-carelog.dev.internal:8443"
     error_message = "Core must call Carelog at the origin only; enrollment uses the HTTPS listener and claims use the same HTTPS listener origin."
   }
   assert {
-    condition     = output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"] == "https://carelog.dev.internal" && startswith(output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"], "https://")
+    condition     = output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"] == "https://dev-carelog.dev.internal:8443" && startswith(output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"], "https://")
     error_message = "Core rejects non-loopback http for enrollment, so the enrollment origin must be https."
   }
   assert {
@@ -203,8 +203,8 @@ run "dev_dual_auth_enabled_plans_with_secret_arns" {
 run "dev_dual_auth_requires_secret_arns" {
   command = plan
   variables {
-    carelog_enrollment_origin = "https://carelog.dev.internal"
-    carelog_claims_origin     = "https://carelog.dev.internal"
+    carelog_enrollment_origin = "https://dev-carelog.dev.internal:8443"
+    carelog_claims_origin     = "https://dev-carelog.dev.internal:8443"
     core_truststore = {
       trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
@@ -221,8 +221,8 @@ run "dev_dual_auth_requires_secret_arns" {
 run "dev_dual_auth_requires_redis_tls_setting" {
   command = plan
   variables {
-    carelog_enrollment_origin = "https://carelog.dev.internal"
-    carelog_claims_origin     = "https://carelog.dev.internal"
+    carelog_enrollment_origin = "https://dev-carelog.dev.internal:8443"
+    carelog_claims_origin     = "https://dev-carelog.dev.internal:8443"
     core_truststore = {
       trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
@@ -241,8 +241,8 @@ run "dev_dual_auth_requires_redis_tls_setting" {
 run "dev_dual_auth_requires_gateway_runtime_keys" {
   command = plan
   variables {
-    carelog_enrollment_origin = "https://carelog.dev.internal"
-    carelog_claims_origin     = "https://carelog.dev.internal"
+    carelog_enrollment_origin = "https://dev-carelog.dev.internal:8443"
+    carelog_claims_origin     = "https://dev-carelog.dev.internal:8443"
     core_truststore = {
       trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
@@ -324,8 +324,8 @@ run "dev_dual_auth_requires_core_truststore" {
         PLATFORM_IDENTITY_JWT_SECRET_KEY      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-jwt-AbCdEf"
       }
     })
-    carelog_enrollment_origin = "https://carelog.dev.internal"
-    carelog_claims_origin     = "https://carelog.dev.internal"
+    carelog_enrollment_origin = "https://dev-carelog.dev.internal:8443"
+    carelog_claims_origin     = "https://dev-carelog.dev.internal:8443"
     dev_dual_auth = {
       enabled                            = true
       redis_tls_enabled                  = false
@@ -370,7 +370,7 @@ run "dev_dual_auth_requires_claims_origin" {
         PLATFORM_IDENTITY_JWT_SECRET_KEY      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-jwt-AbCdEf"
       }
     })
-    carelog_enrollment_origin = "https://carelog.dev.internal"
+    carelog_enrollment_origin = "https://dev-carelog.dev.internal:8443"
     dev_dual_auth = {
       enabled                            = true
       redis_tls_enabled                  = false
@@ -531,4 +531,46 @@ run "sidecar_images_must_be_digest_pinned" {
     }]
   }
   expect_failures = [var.gateway_additional_containers]
+}
+
+# One source for the Carelog host: the origin must be <service_name>.<namespace_name>:8443 (carelog output).
+run "carelog_origin_must_match_namespace" {
+  command = plan
+
+  variables {
+    carelog_enrollment_origin = "https://ranikun-carelog-dev-api.other.internal:8443"
+  }
+  expect_failures = [var.carelog_enrollment_origin]
+}
+
+run "carelog_claims_origin_must_match_namespace" {
+  command = plan
+
+  variables {
+    carelog_claims_origin = "https://ranikun-carelog-dev-api.other.internal:8443"
+  }
+  expect_failures = [var.carelog_claims_origin]
+}
+
+run "carelog_origin_requires_tls_port" {
+  command = plan
+
+  variables {
+    carelog_enrollment_origin = "https://ranikun-carelog-dev-api.dev.internal"
+  }
+  expect_failures = [var.carelog_enrollment_origin]
+}
+
+run "carelog_origin_matches_carelog_output_shape" {
+  command = plan
+
+  variables {
+    carelog_enrollment_origin = "https://ranikun-carelog-dev-api.dev.internal:8443"
+    carelog_claims_origin     = "https://ranikun-carelog-dev-api.dev.internal:8443"
+  }
+
+  assert {
+    condition     = var.carelog_enrollment_origin == var.carelog_claims_origin
+    error_message = "Enrollment and claims use the same Carelog origin (one TLS listener)."
+  }
 }

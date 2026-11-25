@@ -94,12 +94,20 @@ variable "carelog_enrollment_origin" {
     condition     = !var.dev_dual_auth.enabled || var.carelog_enrollment_origin != null
     error_message = "carelog_enrollment_origin is required when dev_dual_auth.enabled is true."
   }
+  validation {
+    condition     = try(endswith(var.carelog_enrollment_origin, ".${var.namespace_name}:8443"), var.carelog_enrollment_origin == null)
+    error_message = "carelog_enrollment_origin must be <service_name>.<namespace_name>:8443, the Carelog output carelog_private_https_origin (same namespace as namespace_name)."
+  }
 }
 
 variable "carelog_claims_origin" {
   type        = string
   default     = null
   description = "Private HTTPS origin of DEV Carelog for Core product claims: the same TLS listener (port 8443) as enrollment, which serves enrollment PUT and claims GET only. Scheme, host and port only. Required when dev_dual_auth.enabled."
+  validation {
+    condition     = try(endswith(var.carelog_claims_origin, ".${var.namespace_name}:8443"), var.carelog_claims_origin == null)
+    error_message = "carelog_claims_origin must be <service_name>.<namespace_name>:8443, the Carelog output carelog_private_https_origin (same namespace as namespace_name)."
+  }
   validation {
     condition     = var.carelog_claims_origin == null || can(regex("^https://[^/?#@ ]+$", var.carelog_claims_origin))
     error_message = "carelog_claims_origin must be an https origin without a path, query, fragment or userinfo."
