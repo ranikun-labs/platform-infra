@@ -22,7 +22,7 @@ grep -q 'PRIVATE KEY' "$CA_BUNDLE" && fail "CA_BUNDLE contains private key mater
 
 TAG="$SOURCE_SHA"
 echo "== front proxy image"
-docker build --build-arg SOURCE_SHA="$SOURCE_SHA" -t "carelog-tls-front:$TAG" "$HERE/proxy"
+docker build --build-arg SOURCE_SHA="$SOURCE_SHA" -t "carelog-tls-proxy:$TAG" "$HERE/proxy"
 
 CTX=$(mktemp -d)
 trap 'rm -rf "$CTX"' EXIT
@@ -33,7 +33,7 @@ docker build --build-arg CORE_IMAGE="$CORE_IMAGE" --build-arg CA_BUNDLE_SRC=ca-b
   --build-arg SOURCE_SHA="$SOURCE_SHA" -t "carelog-trust-init:$TAG" "$CTX"
 
 if [ -n "${PROXY_REPO:-}" ]; then
-  docker tag "carelog-tls-front:$TAG" "$PROXY_REPO:$TAG"
+  docker tag "carelog-tls-proxy:$TAG" "$PROXY_REPO:$TAG"
   docker push "$PROXY_REPO:$TAG" >/dev/null
   echo "front proxy digest: $(docker inspect -f '{{index .RepoDigests 0}}' "$PROXY_REPO:$TAG")"
 fi

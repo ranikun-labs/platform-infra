@@ -4,15 +4,14 @@
 FROM nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
 ARG SOURCE_SHA=unknown
 LABEL org.opencontainers.image.revision=$SOURCE_SHA \
-      org.opencontainers.image.title="carelog-tls-front-proxy"
+      org.opencontainers.image.title="carelog-tls-proxy"
 # jq parses TLS_BUNDLE_JSON; openssl checks the certificate, key pair and SAN before nginx starts.
 RUN apk add --no-cache jq=1.8.2-r0 openssl=3.3.7-r2
 COPY nginx.conf.template /etc/nginx/templates/carelog-tls.conf.template
 COPY proxy-entrypoint.sh /usr/local/bin/carelog-proxy
-# Empty until the entrypoint renders it. nginx does not include conf.d/*.inc automatically.
+# conf.d/default.conf is rendered by the entrypoint from the template.
 RUN chmod 755 /usr/local/bin/carelog-proxy \
  && chmod 644 /etc/nginx/templates/carelog-tls.conf.template \
- && : > /etc/nginx/conf.d/claims-8080.inc \
  && mkdir -p /run/carelog-tls && chmod 700 /run/carelog-tls
 # ECS ignores the Dockerfile HEALTHCHECK; the task definition carries the same command.
 # Passes when nginx is alive, the loopback health route reaches the app liveness probe, and the TLS listener is bound.

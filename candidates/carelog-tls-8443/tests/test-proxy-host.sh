@@ -1,9 +1,11 @@
 #!/bin/sh
 # Functional test of the front proxy, host mode. Uses the SAME nginx template and the SAME entrypoint as the image;
 # only the network is simulated with loopback addresses:
-#   carelog-be stand-in  127.0.0.1:8080  (bound to loopback only, like SERVER_ADDRESS=127.0.0.1)
-#   task IP (proxy)      127.0.0.2       (8080 plain front, 8443 TLS)
+#   carelog-be stand-in  127.0.0.1:8080  (upstream of the proxy; loopback, as the app sees Core traffic)
+#   task IP (proxy)      127.0.0.2:8443  (TLS only)
 #   ECS metadata stub    127.0.0.1:19000 (returns 127.0.0.2 as the task IPv4)
+# Not covered here: the app's 0.0.0.0:8080 bind for Gateway and the app-side loopback check on internal endpoints.
+# Those are carelog-be tests. This suite proves only that the proxy never listens on the task IP:8080.
 # Requires: nginx, openssl, jq, wget, curl, keytool and a JDK (java/javac) on the host, sudo-free except one
 # /etc/hosts line for the JDK client (added and removed by this script; skipped if not writable).
 # Usage: test-proxy-host.sh <workdir>   Evidence lines go to <workdir>/evidence.txt.
@@ -26,6 +28,7 @@ CLAIMS="/api/v1/internal/identity/claims/$UUID"
 AUTH="Authorization: Bearer 0123456789abcdef0123456789abcdef"
 CORE_HDR="X-Service-Id: platform-identity"
 TLS="--cacert $PKI/ca.crt --resolve $SAN:8443:$TASK_IP"
+JSON_CT='Content-Type: application/json'
 
 mkdir -p "$WORK/stub" "$WORK/meta" "$WORK/proxy/nginx/conf.d" "$WORK/proxy/nginx/templates" "$WORK/proxy/tls"
 : > "$EVIDENCE"
@@ -48,6 +51,7 @@ trap cleanup EXIT INT TERM
 
 check() {  # name expected_code curl-args...
   name=$1; want=$2; shift 2
+  rm -f "$WORK/body"
   got=$(curl --noproxy '*' --path-as-is -s -o "$WORK/body" -w '%{http_code}' "$@" 2>"$WORK/err" || true)
   body=$(head -c 160 "$WORK/body" 2>/dev/null | tr -d '\n')
   if [ "$got" = "$want" ]; then
@@ -66,24 +70,30 @@ check_fail() {  # name curl-args...  (client-side TLS refusal expected)
   fi
 }
 
-wait_port() {  # url
-  i=0
-  until curl --noproxy '*' -s -o /dev/null "$1" 2>/dev/null; do
-    i=$((i + 1)); [ "$i" -gt 30 ] && return 1; sleep 0.5
-  done
+check_deny_json() {  # name curl-args...  (a 403 must carry the JSON body and content type)
+  name=$1; shift
+  ct=$(curl --noproxy '*' --path-as-is -s -o "$WORK/body" -w '%{content_type}' "$@" 2>/dev/null || true)
+  if [ "$ct" = application/json ] && grep -q '"error":"forbidden"' "$WORK/body"; then
+    PASSES=$((PASSES + 1)); log "PASS [$name] content-type=$ct body=$(tr -d '\n' < "$WORK/body")"
+  else
+    FAILS=$((FAILS + 1)); log "FAIL [$name] content-type=${ct:-none} body=$(head -c 120 "$WORK/body" | tr -d '\n')"
+  fi
 }
 
-start_nginx() {  # conf-file (daemon off assumed)  -> background, sets pid via file
-  "$NG" -c "$1" -t >/dev/null 2>&1 || { log "FAIL nginx -t for $1"; FAILS=$((FAILS + 1)); return 1; }
+wait_tls() {  # 8443 answers (any HTTP status) once nginx is up
+  i=0
+  until curl --noproxy '*' -s -o /dev/null $TLS "https://$SAN:8443/api/v1/x" 2>/dev/null; do
+    i=$((i + 1)); [ "$i" -gt 30 ] && return 1; sleep 0.5
+  done
 }
 
 echo "== generate test PKI"
 sh "$HERE/tests/gen-material.sh" "$PKI" || exit 1
 
-echo "== carelog-be stand-in on 127.0.0.1:8080 (echo)"
+echo "== carelog-be stand-in on 127.0.0.1:8080 (echo; the proxy upstream)"
 sed -e "s|__PID__|$WORK/stub/nginx.pid|" -e "s|__ERRLOG__|$WORK/stub/error.log|" \
   "$HERE/tests/stub-upstream.conf" > "$WORK/stub/nginx.conf"
-start_nginx "$WORK/stub/nginx.conf" || exit 1
+"$NG" -c "$WORK/stub/nginx.conf" -t >/dev/null 2>&1 || { echo "FAIL stub config"; exit 1; }
 "$NG" -c "$WORK/stub/nginx.conf" &
 sleep 1
 
@@ -105,12 +115,12 @@ http {
 EOF
 cp "$HERE/proxy/nginx.conf.template" "$WORK/proxy/nginx/templates/carelog-tls.conf.template"
 
-start_proxy() {  # claims_on_8080 (true|false)
+start_proxy() {
   stop_proxy
   rm -f "$WORK/proxy/nginx.pid"
   env ECS_CONTAINER_METADATA_URI_V4="http://127.0.0.1:$META_PORT" \
     TLS_EXPECTED_DNS_SAN="$SAN" TLS_BUNDLE_JSON="$(jq -c . "$PKI/bundle-good.json")" \
-    CORE_CLAIMS_ON_8080="$1" CARELOG_NGINX_DIR="$WORK/proxy/nginx" CARELOG_TLS_RUN_DIR="$WORK/proxy/tls" \
+    CARELOG_NGINX_DIR="$WORK/proxy/nginx" CARELOG_TLS_RUN_DIR="$WORK/proxy/tls" \
     sh "$HERE/proxy/proxy-entrypoint.sh" >"$WORK/proxy/entry.log" 2>&1 &
   PROXY_PID=$!
   i=0
@@ -141,77 +151,77 @@ java_checks() {
       FAILS=$((FAILS + 1)); log "FAIL [java: $name] rc=$rc want=$want $(printf '%s' "$out" | head -2 | tr '\n' ' ')"
     fi
   }
-  jrun "new Core enrollment PUT 8443 (TLS, SAN and hostname verified)" 0 PUT "https://$SAN:8443$ENROLL" "$TS" 200 "Authorization=Bearer 0123456789abcdef0123456789abcdef"
+  # The JDK sends Host: <name>:8443. The Host check must accept it (port is dropped by $host).
+  jrun "new Core enrollment PUT 8443 (TLS, SAN and hostname verified, Host with port)" 0 PUT "https://$SAN:8443$ENROLL" "$TS" 200 "Authorization=Bearer 0123456789abcdef0123456789abcdef"
   jrun "new Core claims GET 8443 (TLS, SAN and hostname verified)" 0 GET "https://$SAN:8443$CLAIMS" "$TS" 200 "X-Service-Id=platform-identity"
-  jrun "new Core enrollment via 8080 refused" 0 PUT "http://$TASK_IP:8080$ENROLL" "-" 403 "Authorization=Bearer 0123456789abcdef0123456789abcdef"
-  jrun "old Core claims GET over http 8080 (rollback path)" 0 GET "http://$TASK_IP:8080$CLAIMS" "-" 200 "X-Service-Id=platform-identity"
   jrun "JDK default truststore rejects test CA" 2 GET "https://$SAN:8443$CLAIMS" "-" 200
 }
 
-run_suite() {  # claims_on_8080
-  CLAIMS_ON=$1
-  log ""
-  log "### suite: CORE_CLAIMS_ON_8080=$CLAIMS_ON (task IP $TASK_IP)"
-  start_proxy "$CLAIMS_ON" || { log "FAIL proxy did not start"; FAILS=$((FAILS + 1)); return; }
-  wait_port "http://$TASK_IP:8080/api/v1/users/user-id/x" || log "WARN 8080 front not answering"
+log "### proxy suite (task IP $TASK_IP, upstream 127.0.0.1:8080)"
+start_proxy || { log "FAIL proxy did not start"; FAILS=$((FAILS + 1)); exit 1; }
+wait_tls || log "WARN 8443 not answering"
 
-  [ "$CLAIMS_ON" = true ] && java_checks
+java_checks
 
-  log "-- 8443 TLS listener (Core: enrollment PUT + claims GET only)"
-  check "8443 enrollment PUT ok" 200 $TLS -X PUT -H "$AUTH" -H 'Content-Type: application/json' -d '{}' "https://$SAN:8443$ENROLL"
-  check "8443 claims GET ok" 200 $TLS -H "$CORE_HDR" "https://$SAN:8443$CLAIMS"
-  check "8443 enrollment GET denied" 403 $TLS "https://$SAN:8443$ENROLL"
-  check "8443 claims PUT denied" 403 $TLS -X PUT "https://$SAN:8443$CLAIMS"
-  check "8443 gateway path denied" 403 $TLS "https://$SAN:8443/api/v1/users/user-id/x"
-  check "8443 non-UUID accountId denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/internal/v1/identity/carelog/enrollments/abc"
-  check "8443 bypass /internal/x//enrollments denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/internal/x//enrollments/$UUID"
-  check "8443 bypass //v1 denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/internal/v1//identity/carelog/enrollments/$UUID"
-  check "8443 encoded slash denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/internal/v1/identity/carelog/enrollments%2F$UUID"
-  check "8443 path parameter ; denied" 403 $TLS -X PUT "https://$SAN:8443$ENROLL;x=1"
-  check "8443 dot segment denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/internal/x/../v1/identity/carelog/enrollments/$UUID"
-  check "8443 trailing slash denied" 403 $TLS -X PUT "https://$SAN:8443$ENROLL/"
-  check "8443 encoded internal segment denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/%69nternal/v1/identity/carelog/enrollments/$UUID"
-  check "8443 plain HTTP not served" 400 -X PUT "http://$TASK_IP:8443$ENROLL"
-  check_fail "client without test CA refuses 8443" --resolve "$SAN:8443:$TASK_IP" "https://$SAN:8443$CLAIMS"
-  check_fail "client refuses wrong hostname" --cacert "$PKI/ca.crt" --resolve "other.test.internal:8443:$TASK_IP" "https://other.test.internal:8443$CLAIMS"
+log "-- 8443 allowed paths (Core: enrollment PUT and claims GET)"
+check "enrollment PUT ok" 200 $TLS -X PUT -H "$AUTH" -H "$JSON_CT" -d '{}' "https://$SAN:8443$ENROLL"
+check "claims GET ok" 200 $TLS -H "$CORE_HDR" "https://$SAN:8443$CLAIMS"
+check "claims GET ok, query string passed (not checked)" 200 $TLS -H "$CORE_HDR" "https://$SAN:8443$CLAIMS?cursor=;//..%2F&x=%0a"
+check "enrollment PUT ok, query with ;// and .. passed" 200 $TLS -X PUT -H "$AUTH" -H "$JSON_CT" -d '{}' "https://$SAN:8443$ENROLL?x=;//../%0d"
+check "Host with port of expected name ok" 200 $TLS -H "$CORE_HDR" -H "Host: $SAN:8443" "https://$SAN:8443$CLAIMS"
 
-  log "-- 8080 front (Gateway pass-through; enrollment never; claims per CORE_CLAIMS_ON_8080)"
-  check "8080 enrollment PUT denied" 403 -X PUT -H "$AUTH" "http://$TASK_IP:8080$ENROLL"
-  check "8080 enrollment bypass denied" 403 -X PUT -H "$AUTH" "http://$TASK_IP:8080/api/v1/internal/x//enrollments/$UUID"
-  check "8080 enrollment // prefix denied" 403 -X PUT -H "$AUTH" "http://$TASK_IP:8080//api/v1/internal/v1/identity/carelog/enrollments/$UUID"
-  check "8080 encoded internal denied" 403 -X PUT -H "$AUTH" "http://$TASK_IP:8080/api/v1/%69nternal/v1/identity/carelog/enrollments/$UUID"
-  check "8080 case variant internal denied" 403 -X PUT -H "$AUTH" "http://$TASK_IP:8080/api/v1/Internal/v1/identity/carelog/enrollments/$UUID"
-  check "8080 gateway GET passes" 200 "http://$TASK_IP:8080/api/v1/users/user-id/abc"
-  check "8080 gateway POST passes" 200 -X POST -H 'Content-Type: application/json' -d '{}' "http://$TASK_IP:8080/api/v1/users/managers"
-  check "8080 other internal path denied" 403 -H "$CORE_HDR" "http://$TASK_IP:8080/api/v1/internal/identity/other/$UUID"
-  check "8080 non-api path denied" 403 "http://$TASK_IP:8080/rag/anything"
-  check "8080 claims with trailing segment denied" 403 -H "$CORE_HDR" "http://$TASK_IP:8080$CLAIMS/extra"
-  if [ "$CLAIMS_ON" = true ]; then
-    check "8080 claims GET ok (transition, old Core)" 200 -H "$CORE_HDR" "http://$TASK_IP:8080$CLAIMS"
-    check "8080 claims PUT denied" 403 -X PUT -H "$CORE_HDR" "http://$TASK_IP:8080$CLAIMS"
-  else
-    check "8080 claims closed after rollback window" 403 -H "$CORE_HDR" "http://$TASK_IP:8080$CLAIMS"
-    check "8443 claims still ok after rollback window" 200 $TLS -H "$CORE_HDR" "https://$SAN:8443$CLAIMS"
-    check "8080 gateway GET still passes after window" 200 "http://$TASK_IP:8080/api/v1/users/user-id/abc"
-  fi
+log "-- 8443 denied: method, path, and identifier"
+check "enrollment GET denied" 403 $TLS "https://$SAN:8443$ENROLL"
+check "claims PUT denied" 403 $TLS -X PUT "https://$SAN:8443$CLAIMS"
+check "gateway path denied" 403 $TLS "https://$SAN:8443/api/v1/users/user-id/x"
+check "non-UUID accountId denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/internal/v1/identity/carelog/enrollments/abc"
+check "other internal path denied" 403 $TLS -H "$CORE_HDR" "https://$SAN:8443/api/v1/internal/identity/other/$UUID"
+check "bypass /internal/x//enrollments denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/internal/x//enrollments/$UUID"
+check "bypass //v1 denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/internal/v1//identity/carelog/enrollments/$UUID"
+check "encoded slash denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/internal/v1/identity/carelog/enrollments%2F$UUID"
+check "path parameter ; denied" 403 $TLS -X PUT "https://$SAN:8443$ENROLL;x=1"
+check "dot segment .. denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/internal/x/../v1/identity/carelog/enrollments/$UUID"
+check "encoded dot segment %2e%2e denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/internal/%2e%2e/v1/identity/carelog/enrollments/$UUID"
+check "/./ segment denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/internal/./v1/identity/carelog/enrollments/$UUID"
+check "trailing /. denied" 403 $TLS -H "$CORE_HDR" "https://$SAN:8443$CLAIMS/."
+check "trailing slash denied" 403 $TLS -X PUT "https://$SAN:8443$ENROLL/"
+check "encoded internal segment denied" 403 $TLS -X PUT "https://$SAN:8443/api/v1/%69nternal/v1/identity/carelog/enrollments/$UUID"
+check "UUID then %0a denied" 403 $TLS -X PUT -H "$AUTH" "https://$SAN:8443$ENROLL%0a"
+check "UUID then %0d denied" 403 $TLS -H "$CORE_HDR" "https://$SAN:8443$CLAIMS%0d"
+check "UUID then %25 denied" 403 $TLS -H "$CORE_HDR" "https://$SAN:8443$CLAIMS%25"
+check "encoded %00 in path refused by nginx parser (400, never reaches app)" 400 $TLS -H "$CORE_HDR" "https://$SAN:8443$CLAIMS%00"
+check_deny_json "403 carries JSON body" $TLS "https://$SAN:8443/api/v1/users/user-id/x"
 
-  log "-- listener scope"
-  if ss -ltn 2>/dev/null | awk '{print $4}' | grep -E '^(0\.0\.0\.0|\*|\[::\]):(8080|8443)$' >/dev/null; then
-    FAILS=$((FAILS + 1)); log "FAIL [wildcard listener on 8080/8443]"
-  else
-    PASSES=$((PASSES + 1)); log "PASS [no wildcard listener on 8080/8443]"
-  fi
-  if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qx '127.0.0.1:8080'; then
-    PASSES=$((PASSES + 1)); log "PASS [carelog stand-in bound to 127.0.0.1:8080 only]"
-  else
-    FAILS=$((FAILS + 1)); log "FAIL [127.0.0.1:8080 listener missing]"
-  fi
-  grep -E '\[(emerg|crit|alert)\]' "$WORK/proxy/error.log" >/dev/null 2>&1 && { FAILS=$((FAILS + 1)); log "FAIL [nginx emerg/crit]"; }
-  stop_proxy
-}
+log "-- 8443 Host and transport"
+check "Host other name -> 421" 421 $TLS -X PUT -H "$AUTH" -H "$JSON_CT" -H "Host: other.test.internal" -d '{}' "https://$SAN:8443$ENROLL"
+check "plain HTTP to 8443 not served" 400 -X PUT "http://$TASK_IP:8443$ENROLL"
+check_fail "client without test CA refuses 8443" --resolve "$SAN:8443:$TASK_IP" "https://$SAN:8443$CLAIMS"
+check_fail "client refuses wrong hostname" --cacert "$PKI/ca.crt" --resolve "other.test.internal:8443:$TASK_IP" "https://other.test.internal:8443$CLAIMS"
 
-run_suite true
-run_suite false
+log "-- listener scope (no listener on 8080 from the proxy)"
+check "no proxy listener on task IP:8080 (connection refused)" 000 "http://$TASK_IP:8080$CLAIMS"
+if grep -Eq 'listen[[:space:]]+[^;]*8080' "$WORK/proxy/nginx/conf.d/default.conf"; then
+  FAILS=$((FAILS + 1)); log "FAIL [rendered config has a listen on 8080]"
+else
+  PASSES=$((PASSES + 1)); log "PASS [rendered config has no listen on 8080]"
+fi
+if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qx "$TASK_IP:8443"; then
+  PASSES=$((PASSES + 1)); log "PASS [TLS listener bound to task IP:8443]"
+else
+  FAILS=$((FAILS + 1)); log "FAIL [task IP:8443 listener missing]"
+fi
+if ss -ltn 2>/dev/null | awk '{print $4}' | grep -E '^(0\.0\.0\.0|\*|\[::\]):(8080|8443)$' >/dev/null; then
+  FAILS=$((FAILS + 1)); log "FAIL [wildcard listener on 8080/8443]"
+else
+  PASSES=$((PASSES + 1)); log "PASS [no wildcard listener on 8080/8443]"
+fi
+if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qx '127.0.0.1:8080'; then
+  PASSES=$((PASSES + 1)); log "PASS [upstream stand-in bound to 127.0.0.1:8080 only]"
+else
+  FAILS=$((FAILS + 1)); log "FAIL [127.0.0.1:8080 listener missing]"
+fi
+grep -E '\[(emerg|crit|alert)\]' "$WORK/proxy/error.log" >/dev/null 2>&1 && { FAILS=$((FAILS + 1)); log "FAIL [nginx emerg/crit]"; }
+stop_proxy
 
 log ""
 log "SUMMARY pass=$PASSES fail=$FAILS"

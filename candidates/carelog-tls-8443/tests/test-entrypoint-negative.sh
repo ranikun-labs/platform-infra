@@ -18,11 +18,10 @@ bundle() {  # cert_file key_file -> compact JSON
   jq -c -n --rawfile c "$1" --rawfile k "$2" '{tls_certificate: $c, tls_private_key: $k}'
 }
 
-run_case() {  # name expected-fragment   (inputs: TLS_EXPECTED_DNS_SAN, TLS_BUNDLE_JSON, optional CORE_CLAIMS_ON_8080)
+run_case() {  # name expected-fragment   (inputs: TLS_EXPECTED_DNS_SAN, TLS_BUNDLE_JSON)
   name=$1; want=$2
   out=$(env -i PATH="$PATH" ECS_CONTAINER_METADATA_URI_V4=http://127.0.0.1:1 \
     TLS_EXPECTED_DNS_SAN="$TLS_EXPECTED_DNS_SAN" TLS_BUNDLE_JSON="$TLS_BUNDLE_JSON" \
-    ${CORE_CLAIMS_ON_8080:+CORE_CLAIMS_ON_8080="$CORE_CLAIMS_ON_8080"} \
     CARELOG_NGINX_DIR="$NGX" CARELOG_TLS_RUN_DIR="$WORK/neg-tls" \
     sh "$HERE/proxy/proxy-entrypoint.sh" 2>&1)
   code=$?
@@ -37,7 +36,6 @@ run_case() {  # name expected-fragment   (inputs: TLS_EXPECTED_DNS_SAN, TLS_BUND
   else
     FAIL=$((FAIL + 1)); echo "FAIL [$name] exit=$code want='$want' out=$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
   fi
-  unset CORE_CLAIMS_ON_8080
 }
 
 TLS_EXPECTED_DNS_SAN=$SAN TLS_BUNDLE_JSON=$(bundle "$PKI/good.crt" "$PKI/good.key") run_case "valid bundle passes local checks" ""
@@ -52,7 +50,6 @@ TLS_EXPECTED_DNS_SAN=$SAN TLS_BUNDLE_JSON=$(bundle "$WORK/chain.crt" "$PKI/good.
 TLS_EXPECTED_DNS_SAN='*.test.internal' TLS_BUNDLE_JSON=$(bundle "$PKI/good.crt" "$PKI/good.key") run_case "wildcard expected name refused" "not a plain DNS name"
 TLS_EXPECTED_DNS_SAN= TLS_BUNDLE_JSON=$(bundle "$PKI/good.crt" "$PKI/good.key") run_case "empty expected name refused" "TLS_EXPECTED_DNS_SAN"
 TLS_EXPECTED_DNS_SAN=$SAN TLS_BUNDLE_JSON='not json' run_case "non-JSON bundle refused" "not a JSON object"
-TLS_EXPECTED_DNS_SAN=$SAN TLS_BUNDLE_JSON=$(bundle "$PKI/good.crt" "$PKI/good.key") CORE_CLAIMS_ON_8080=maybe run_case "invalid CORE_CLAIMS_ON_8080 refused" "must be true or false"
 
 echo "SUMMARY negative pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]

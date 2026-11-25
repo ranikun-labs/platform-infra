@@ -1,13 +1,11 @@
 #!/bin/sh
-# Starts the carelog TLS front proxy. Values are never printed; errors name the failed check only.
+# Starts the carelog TLS front proxy (8443 only). Values are never printed; errors name the failed check only.
 #
 # Required environment:
 #   TLS_BUNDLE_JSON        one Secrets Manager string: {"tls_certificate": "<leaf PEM>", "tls_private_key": "<PEM>"}
 #   TLS_EXPECTED_DNS_SAN   the exact DNS name Core dials: <service_name>.<namespace_name>. No default on purpose.
+#                          Also the only Host value the listener accepts (anything else gets 421).
 #   ECS_CONTAINER_METADATA_URI_V4   set by ECS (the task IPv4 is read from it)
-# Optional:
-#   CORE_CLAIMS_ON_8080    "true" (default, transition) keeps the old Core claims path on task IP:8080.
-#                          "false" is set after the rollback window closes. Gateway routes on 8080 are unaffected.
 # Path overrides (tests only; the image uses the defaults):
 #   CARELOG_NGINX_DIR      default /etc/nginx          (nginx.conf, conf.d/, templates/)
 #   CARELOG_TLS_RUN_DIR    default /run/carelog-tls    (server.crt, server.key)
@@ -19,7 +17,6 @@ TLS_DIR="${CARELOG_TLS_RUN_DIR:-/run/carelog-tls}"
 NGINX_CONF="$NGINX_DIR/nginx.conf"
 TEMPLATE="$NGINX_DIR/templates/carelog-tls.conf.template"
 RENDERED="$NGINX_DIR/conf.d/default.conf"
-CLAIMS_INC="$NGINX_DIR/conf.d/claims-8080.inc"
 CERT_FILE="$TLS_DIR/server.crt"
 KEY_FILE="$TLS_DIR/server.key"
 
@@ -32,9 +29,6 @@ fail() {
 : "${ECS_CONTAINER_METADATA_URI_V4:?ECS metadata endpoint required}"
 [ -n "${TLS_BUNDLE_JSON:-}" ] || fail "TLS_BUNDLE_JSON required"
 [ -n "${TLS_EXPECTED_DNS_SAN:-}" ] || fail "TLS_EXPECTED_DNS_SAN required"
-
-CLAIMS_ON_8080="${CORE_CLAIMS_ON_8080:-true}"
-case "$CLAIMS_ON_8080" in true|false) ;; *) fail "CORE_CLAIMS_ON_8080 must be true or false" ;; esac
 
 # Expected name: one plain DNS name (letters, digits, '.', '-'; no wildcard, space, newline or regex).
 case "$TLS_EXPECTED_DNS_SAN" in
@@ -105,24 +99,11 @@ TASK_IPV4="$(wget -q -T 5 -O - "$ECS_CONTAINER_METADATA_URI_V4/task" \
   | jq -er '[.Containers[].Networks[]?.IPv4Addresses[]?][0]')" || fail "cannot read task IPv4 from metadata"
 case "$TASK_IPV4" in *[!0-9.]*|'') fail "invalid task IPv4" ;; esac
 
-# Transition-only Core claims on 8080: exact UUID path, GET only. Empty file when disabled.
-if [ "$CLAIMS_ON_8080" = true ]; then
-cat > "$CLAIMS_INC" <<'EOF'
-    location ~ "^/api/v1/internal/identity/claims/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" {
-        limit_except GET { deny all; }
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-    }
-EOF
-else
-  : > "$CLAIMS_INC"
-fi
-
 # Render. sed replaces fixed placeholders only; nginx variables such as $host are left untouched.
 sed -e "s|__TASK_IPV4__|$TASK_IPV4|g" \
     -e "s|__TLS_DIR__|$TLS_DIR|g" \
-    -e "s|__NGINX_DIR__|$NGINX_DIR|g" \
+    -e "s|__TLS_EXPECTED_DNS_SAN__|$EXPECTED_SAN|g" \
     "$TEMPLATE" > "$RENDERED"
 nginx -c "$NGINX_CONF" -t
-echo "proxy-entrypoint: ready (8080 front claims=$CLAIMS_ON_8080, TLS 8443 for $EXPECTED_SAN)"
+echo "proxy-entrypoint: ready (TLS 8443 on task IP for $EXPECTED_SAN, upstream loopback 8080)"
 exec nginx -c "$NGINX_CONF" -g 'daemon off;'
