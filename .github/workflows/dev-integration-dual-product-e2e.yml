@@ -80,7 +80,7 @@ jobs:
             echo '## Dev integration dual-product E2E'
             echo '- Target: `CARELOG_ENROLLMENT_TARGET=real`. Enrollment PUT and product-claims GET are served by the real carelog-be (prod profile). No stub.'
             echo '- One Core: Carelog auth and Finance reference together with DEV dual-auth (`dev` profile + `PLATFORM_IDENTITY_FINANCE_REFERENCE_DEV_DUAL_AUTH_ENABLED=true`).'
-            echo '- Deviations from DEV are listed under "Deviations" by the run step. Any setting not listed there was supplied as DEV would need it (see injection table).'
+            echo '- The run step writes two sections: "DEV 설정 기동 결과" (DEV-parity probe, per-remediation cause table) and "보정 후 E2E 결과" (E2E outcome with deviations). Settings not listed as deviations were supplied as DEV would need them (see injection table).'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify platform-infra candidate pin
@@ -89,18 +89,18 @@ jobs:
           set -euo pipefail
           # Fail-closed. No history rewrite: INFRA_BASE only has to be an ancestor of the candidate.
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
-            echo "FAIL-CLOSED: checked-out HEAD does not equal GITHUB_SHA."; exit 1; }
+            echo "FAIL-CLOSED: checked-out HEAD does not equal GITHUB_SHA." >&2; exit 1; }
           git merge-base --is-ancestor "$INFRA_BASE" HEAD || {
-            echo "FAIL-CLOSED: INFRA_BASE ($INFRA_BASE) is not an ancestor of the candidate."; exit 1; }
+            echo "FAIL-CLOSED: INFRA_BASE ($INFRA_BASE) is not an ancestor of the candidate." >&2; exit 1; }
           test -z "$(git diff --name-status "$INFRA_BASE" HEAD | awk '$1 != "A"')" || {
-            echo "FAIL-CLOSED: candidate modifies, renames or deletes files relative to INFRA_BASE."; exit 1; }
+            echo "FAIL-CLOSED: candidate modifies, renames or deletes files relative to INFRA_BASE." >&2; exit 1; }
           expected="$(printf '%s\n' \
             .github/workflows/dev-integration-dual-product-e2e.yml \
             scripts/e2e/dev-integration-dual-product-e2e.mjs \
             scripts/e2e/run-dev-integration-dual-product-e2e.sh | sort)"
           actual="$(git diff --name-only --no-renames "$INFRA_BASE" HEAD | sort)"
           test "$actual" = "$expected" || {
-            echo "FAIL-CLOSED: candidate file set differs from the three owned E2E files."; exit 1; }
+            echo "FAIL-CLOSED: candidate file set differs from the three owned E2E files." >&2; exit 1; }
           {
             echo "infra_candidate_sha=$GITHUB_SHA"
             echo "infra_candidate_tree=$(git rev-parse 'HEAD^{tree}')"
@@ -115,7 +115,7 @@ jobs:
           # chmod +x for gradlew happens only after the tree check, so modes are never altered before verification.
           fetch_pinned() {
             local repo="$1" sha="$2" tree="$3" name="$4"
-            [[ "$sha" =~ ^[0-9a-f]{40}$ && "$tree" =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL-CLOSED: $name pin is not 40-hex."; exit 1; }
+            [[ "$sha" =~ ^[0-9a-f]{40}$ && "$tree" =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL-CLOSED: $name pin is not 40-hex." >&2; exit 1; }
             local archive="$RUNNER_TEMP/$name.zip" unpack="$RUNNER_TEMP/$name-unpack" bare="$RUNNER_TEMP/$name-tree.git" src got
             curl --fail --silent --show-error --location \
               "https://codeload.github.com/ranikun-labs/$repo/zip/$sha" -o "$archive"
@@ -126,7 +126,7 @@ jobs:
             git init -q --bare "$bare"
             git --git-dir="$bare" --work-tree="$src" add -f -A
             got="$(git --git-dir="$bare" write-tree)"
-            test "$got" = "$tree" || { echo "FAIL-CLOSED: $name tree $got does not match pinned $tree."; exit 1; }
+            test "$got" = "$tree" || { echo "FAIL-CLOSED: $name tree $got does not match pinned $tree." >&2; exit 1; }
             chmod +x "$src/gradlew" 2>/dev/null || true
             printf '%s\n' "$src"
           }
@@ -192,3 +192,12 @@ jobs:
           "$CARELOG_SOURCE_DIR"
           "$FINANCE_SOURCE_DIR"
           "$PLATFORM_SOURCE_DIR"
+
+      - name: Upload redacted run logs (probe, migration, runtime)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dev-integration-dual-product-e2e-logs
+          path: ${{ runner.temp }}/dev-integration-dual-product-e2e-logs/
+          retention-days: 3
+          if-no-files-found: warn

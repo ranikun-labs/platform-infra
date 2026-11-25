@@ -320,7 +320,7 @@ async function main() {
   ];
   console.log(summary.join('\n'));
   if (process.env.GITHUB_STEP_SUMMARY) {
-    await appendFile(process.env.GITHUB_STEP_SUMMARY, ['', '## Verified assertions', ...summary.map((l) => `- ${l}`), ''].join('\n'));
+    await appendFile(process.env.GITHUB_STEP_SUMMARY, ['', '### 검증 항목 (E2E, 보정 후 스택)', ...summary.map((l) => `- ${l}`), ''].join('\n'));
   }
 }
 

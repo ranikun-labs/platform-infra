@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Evidence-pinned, not a standing guard. One run boots, in order: DEV-parity carelog-be (prod profile) with a
-# separate Flyway boot, platform-core (Carelog auth + Finance reference, DEV dual-auth), gateway-app and
-# finance-harness-be, then verifies through the Gateway. Every deviation from DEV and every DEV-parity finding is
-# recorded in the job summary. Secrets are per-run, masked, and never printed.
+# Evidence-pinned, not a standing guard. One run, in order:
+#   1. Flyway migration boot of carelog-be (separate step; a precondition, not a DEV-parity claim).
+#   2. DEV-parity probe of carelog-be (prod profile, DEV config) on the migrated DB. Remediations (a) /run/secrets,
+#      (b) sslmode=disable, (c) VALKEY_TLS_ENABLED=false are applied one at a time, re-probed after each. A failing
+#      probe is a finding recorded in the job summary, not a job failure.
+#   3. Runtime carelog-be with the cumulative remediations, platform-core, gateway-app and finance-harness-be.
+#   4. Verification through the Gateway. Its outcome decides the job.
+# Job summary: "## DEV 설정 기동 결과" (probe) and "## 보정 후 E2E 결과" (E2E). Secrets are per-run, masked in logs,
+# redacted from summaries and uploaded logs, and never printed.
 set -euo pipefail
 
 carelog_source="${1:?carelog-be source checkout is required}"
@@ -30,23 +35,18 @@ finance_management_port=18083
 dead_port=9
 
 log_dir="$RUNNER_TEMP/dev-integration-dual-product-e2e"
+artifact_dir="$RUNNER_TEMP/dev-integration-dual-product-e2e-logs"
 carelog_access_dir="$log_dir/carelog-access"
 carelog_migrate_access_dir="$log_dir/carelog-migrate-access"
 carelog_probe_access_dir="$log_dir/carelog-probe-access"
-mkdir -m 700 -p "$log_dir" "$carelog_access_dir" "$carelog_migrate_access_dir" "$carelog_probe_access_dir"
+mkdir -m 700 -p "$log_dir" "$artifact_dir" "$carelog_access_dir" "$carelog_migrate_access_dir" "$carelog_probe_access_dir"
 
-# Summary lines are printed and appended to the job summary. They never contain secrets or payloads.
-note() {
+# emit: step log plus job summary. note: a bullet in the job summary. Summary text never contains secrets.
+emit() {
   printf '%s\n' "$*"
-  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then printf -- '- %s\n' "$*" >>"$GITHUB_STEP_SUMMARY"; fi
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then printf '%s\n' "$*" >>"$GITHUB_STEP_SUMMARY"; fi
 }
-
-note '### Deviations from DEV (always in effect)'
-note 'DEVIATION: CI Postgres 18.4 and Valkey 9.1.2 service containers stand in for the DEV RDS and managed Valkey.'
-note 'DEVIATION: all secrets are per-run random values in process environments; DEV resolves them from Secrets Manager/SSM.'
-note 'DEVIATION: CARELOG_INTERNAL_IDENTITY_CLAIMS_ENABLED=true is an env override of the literal false in application-prod.yml:39. DEV must inject the same env; not verifiable from the repo.'
-note 'DEVIATION: CARELOG_ENVIRONMENT=dev-integration (metrics tag only; DEV value not in repo). Tomcat access log enabled to observe the enrollment PUT.'
-note 'DEVIATION: unused routes (carelog-be direct, RAG, Kakao OAuth) point at a closed port; they are not exercised.'
+note() { emit "- $*"; }
 
 export JAVA_HOME="$JAVA_HOME_21_X64"
 export PATH="$JAVA_HOME/bin:$PATH"
@@ -70,12 +70,24 @@ carelog_gateway_internal_secret="$(openssl rand -hex 32)"
 gateway_legacy_jwt_key="$(openssl rand -hex 32)"
 gateway_internal_secret="$(openssl rand -hex 32)"
 finance_trusted_context_proof="$(openssl rand -hex 32)"
-for secret in "$identity_db_password" "$carelog_db_password" "$finance_db_password" "$identity_jwt_key" \
-  "$carelog_jwt_key" "$reference_jwt_key" "$product_claims_secret" "$carelog_enrollment_credential" \
-  "$carelog_gateway_internal_secret" "$gateway_legacy_jwt_key" "$gateway_internal_secret" \
-  "$finance_trusted_context_proof"; do
+all_secrets=(
+  "$identity_db_password" "$carelog_db_password" "$finance_db_password" "$identity_jwt_key"
+  "$carelog_jwt_key" "$reference_jwt_key" "$product_claims_secret" "$carelog_enrollment_credential"
+  "$carelog_gateway_internal_secret" "$gateway_legacy_jwt_key" "$gateway_internal_secret"
+  "$finance_trusted_context_proof"
+)
+for secret in "${all_secrets[@]}"; do
   printf '::add-mask::%s\n' "$secret"
 done
+
+# redact: replaces every per-run secret in stdin. Used for summaries, annotations and uploaded logs.
+redact() {
+  if (( ${#all_secrets[@]} == 0 )); then cat; return 0; fi
+  local -a sed_args=()
+  local secret
+  for secret in "${all_secrets[@]}"; do sed_args+=(-e "s/${secret}/[REDACTED]/g"); done
+  sed "${sed_args[@]}"
+}
 
 psql -v ON_ERROR_STOP=1 \
   -v identity_password="$identity_db_password" \
@@ -127,7 +139,7 @@ wait_ready() {
     fi
     sleep 2
   done
-  printf '%s readiness failed; process logs remain on the ephemeral runner only.\n' "$label" >&2
+  printf '%s readiness timed out (process still alive).\n' "$label" >&2
   return 1
 }
 
@@ -135,30 +147,35 @@ carelog_pid=""
 core_pid=""
 gateway_pid=""
 finance_pid=""
-cleanup() {
-  local status=$?
-  trap - EXIT INT TERM
-  # On failure, surface only ERROR/WARN lines (secrets are already ::add-mask::ed).
-  if [[ "$status" -ne 0 ]]; then
-    for log in "$log_dir/carelog-probe.log" "$log_dir/carelog-migrate.log" "$log_dir/carelog-runtime.log" \
-      "$log_dir/core.log" "$log_dir/gateway.log" "$log_dir/finance.log"; do
-      if [[ -f "$log" ]]; then
-        echo "--- ${log##*/}: last ERROR/WARN lines"
-        grep -E ' (ERROR|WARN) ' "$log" | tail -n 40 || true
-      fi
-    done
-    if compgen -G "$carelog_access_dir/access_log*" >/dev/null; then
-      echo "--- carelog-be access log: method, path, status, Content-Length, Transfer-Encoding only"
-      cat "$carelog_access_dir"/access_log* | awk '{print $1, $2, $3, $4, $5}' | tail -n 60 || true
-    fi
+final_level=unset
+probe_pass_level=-1
+section1_written=0
+probe_rows=()
+flyway_line="(not run)"
+
+# Remediation state. Levels are cumulative: 0 none; 1 (a) /run/secrets dir; 2 (b) sslmode=disable;
+# 3 (c) VALKEY_TLS_ENABLED=false. valkey_tls is derived from the level.
+run_secrets_created=0
+valkey_tls=true
+set_accommodations() {
+  local level="$1" sslmode_file="/run/secrets/spring.datasource.hikari.data-source-properties.sslmode"
+  if (( level >= 1 )) && [[ ! -d /run/secrets ]]; then
+    sudo install -d -m 0755 /run/secrets
+    run_secrets_created=1
   fi
-  for pid in "$gateway_pid" "$finance_pid" "$core_pid" "$carelog_pid"; do
-    if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi
-  done
-  wait 2>/dev/null || true
-  exit "$status"
+  if (( level >= 2 )); then
+    printf 'disable' | sudo tee "$sslmode_file" >/dev/null
+    sudo chmod 0644 "$sslmode_file"
+  else
+    sudo rm -f "$sslmode_file"
+  fi
+  if (( level < 1 && run_secrets_created )); then
+    sudo rmdir /run/secrets
+    run_secrets_created=0
+  fi
+  valkey_tls=true
+  if (( level >= 3 )); then valkey_tls=false; fi
 }
-trap cleanup EXIT INT TERM
 
 # Carelog env exactly as the DEV task must supply it (values per-run and synthetic). Spring precedence: OS env
 # beats application-prod.yml, so CARELOG_INTERNAL_IDENTITY_CLAIMS_ENABLED=true overrides the literal `false` in
@@ -187,10 +204,10 @@ carelog_env=(
 
 # start_carelog <label> <spring.flyway.enabled> <access dir> <spring.data.redis TLS enabled>
 start_carelog() {
-  local label="$1" flyway="$2" access_dir="$3" valkey_tls="$4"
+  local label="$1" flyway="$2" access_dir="$3" tls="$4"
   nohup env "${carelog_env[@]}" \
     SPRING_FLYWAY_ENABLED="$flyway" \
-    VALKEY_TLS_ENABLED="$valkey_tls" \
+    VALKEY_TLS_ENABLED="$tls" \
     SERVER_TOMCAT_ACCESSLOG_ENABLED=true \
     SERVER_TOMCAT_ACCESSLOG_BUFFERED=false \
     SERVER_TOMCAT_ACCESSLOG_DIRECTORY="$access_dir" \
@@ -201,50 +218,201 @@ start_carelog() {
 }
 carelog_ready_url="http://127.0.0.1:$carelog_management_port/actuator/health/readiness"
 
-# Step 1: DEV-parity probe. Exactly the DEV-equivalent config: prod profile, configtree import of /run/secrets
-# (non-optional), verify-full DB TLS, Valkey TLS on, Flyway off. Expected to fail if DEV-equivalent runtime lacks
-# the /run/secrets directory or the RDS CA file, which the ECS module and carelog image do not provide.
-start_carelog probe false "$carelog_probe_access_dir" true
-probe_pid="$carelog_pid"
-probe_status=pass
-if ! wait_ready "$probe_pid" "$carelog_ready_url" "carelog-be DEV-parity probe"; then
-  probe_status=fail
-  kill "$probe_pid" 2>/dev/null || true
-  wait "$probe_pid" 2>/dev/null || true
-  failure_classes="$(grep -oE '[A-Za-z0-9_.]+(Exception|Error)' "$log_dir/carelog-probe.log" | sort | uniq -c | sort -rn | head -n 5 | awk '{print $2}' | paste -sd ' ' - || true)"
-  note "FINDING (DEV parity): carelog-be prod profile did not start with the DEV-equivalent config. Exception classes: ${failure_classes:-unknown}."
-  if [[ ! -d /run/secrets ]]; then
-    note "FINDING (DEV parity): /run/secrets does not exist on the runtime. application-prod.yml:3 imports configtree:/run/secrets/ (not optional); ecs-service module declares no volumes and the carelog Dockerfile creates no such directory."
-    sudo install -d -m 0755 /run/secrets
-    note "DEVIATION: /run/secrets created as an EMPTY directory so the configtree import resolves. DEV supplies no files here (secrets arrive as ECS env)."
+# Log helpers. Each reads a Spring Boot log; none prints secrets.
+assert_profile_prod() {
+  local log="$1"
+  if ! grep -Eq 'The following [0-9]+ profiles? (is|are) active: "?prod"?[[:space:]]*$' "$log"; then
+    echo "ASSERT FAILED (L1): active profile is not exactly prod in ${log##*/}." >&2
+    return 1
   fi
-  # DB TLS deviation: verify-full needs /run/rds-ca.pem and a TLS Postgres. CI Postgres is plaintext, so only
-  # sslmode is overridden (through configtree, which outranks the application-prod.yml value).
-  printf 'disable' | sudo tee /run/secrets/spring.datasource.hikari.data-source-properties.sslmode >/dev/null
-  sudo chmod 0644 /run/secrets/spring.datasource.hikari.data-source-properties.sslmode
-  note "DEVIATION: spring.datasource.hikari.data-source-properties.sslmode=disable (DEV: verify-full with /run/rds-ca.pem). Transport only; the CI Postgres has no TLS."
-  note "DEVIATION: VALKEY_TLS_ENABLED=false (DEV default true). CI Valkey has no TLS; transport only."
-  valkey_tls=false
-else
-  kill "$probe_pid" 2>/dev/null || true
-  wait "$probe_pid" 2>/dev/null || true
-  note "DEV-parity probe: carelog-be started with the DEV-equivalent config. No overrides needed."
-  valkey_tls=true
-fi
+}
+assert_flyway_v9() {
+  local log="$1"
+  if ! grep -Eq 'now at version v9([^0-9]|$)|Current version of schema .*: 9([^0-9]|$)' "$log"; then
+    echo "ASSERT FAILED (L2): Flyway did not report version 9 in ${log##*/}." >&2
+    return 1
+  fi
+}
+# extract_cause: first Description line of the Spring failure block, else the deepest "Caused by" line.
+extract_cause() {
+  local log="$1" cause=""
+  if [[ -f "$log" ]] && grep -q 'APPLICATION FAILED TO START' "$log"; then
+    cause="$(awk '/^Description:/{d=1; next} d && NF {print; exit}' "$log" || true)"
+  fi
+  if [[ -z "$cause" && -f "$log" ]]; then
+    cause="$(grep -oE 'Caused by: .*' "$log" | tail -n 1 || true)"
+  fi
+  cause="${cause:-원인 미상 (APPLICATION FAILED TO START 블록 없음)}"
+  printf '%s' "$cause" | redact | tr -d '\r' | cut -c1-240
+}
+# print_failure_block: the Spring Boot Description/Action block (masked) into the step log.
+print_failure_block() {
+  local log="$1"
+  echo "::group::Spring failure block (masked): ${log##*/}"
+  if [[ -f "$log" ]] && grep -q 'APPLICATION FAILED TO START' "$log"; then
+    awk '/APPLICATION FAILED TO START/{p=1} p{print; if (++n >= 40) exit}' "$log" | redact || true
+  else
+    grep -E ' (ERROR|WARN) |Caused by: ' "$log" 2>/dev/null | tail -n 20 | redact || true
+  fi
+  echo '::endgroup::'
+}
+# annotate_warning: one workflow warning per DEV-parity finding. Escapes the characters annotations cannot carry.
+annotate_warning() {
+  local message="$1"
+  message="${message//%/%25}"
+  message="${message//$'\r'/%0D}"
+  message="${message//$'\n'/%0A}"
+  printf '::warning title=DEV parity::%s\n' "$message"
+}
+md_cell() { printf '%s' "$1" | sed 's/|/\\|/g'; }
 
-# Step 2: Flyway as a separate boot (prod disables it at runtime; DEV runs migrations in a separate role/step).
+# Summary sections. Each is written once.
+write_probe_section() {
+  section1_written=1
+  emit ''
+  emit '## DEV 설정 기동 결과'
+  if (( ${#probe_rows[@]} == 0 )); then
+    note 'probe 결과: **미실행**. 선행 Flyway 부팅 단계에서 중단됨.'
+  elif (( probe_pass_level >= 0 )); then
+    note "probe 결과: **PASS**. 보정 ${probe_pass_level}단계에서 readiness UP (prod profile 확인)."
+  else
+    note 'probe 결과: **FAIL**. 보정 (a)(b)(c)를 누적 적용해도 DEV 설정 기동이 실패함. DEV 정합성 FINDING이며 job 실패 사유가 아님. 최종 판정은 아래 E2E 섹션.'
+  fi
+  note "선행 Flyway 부팅: ${flyway_line}. 보정 (a)(b)(c)를 모두 적용한 상태에서 수행하고 끝나면 보정을 초기화한 뒤 probe를 시작함. 빈 DB의 스키마 검증이 probe 원인에 섞이지 않도록 하기 위함."
+  note 'probe 로그 사본(마스킹)은 artifact `dev-integration-dual-product-e2e-logs`로 업로드 (보존 3일).'
+  emit ''
+  emit '| 단계 | 이번 단계에서 추가 적용한 보정 | probe 결과 | 원인 (probe 로그, 마스킹) |'
+  emit '|---|---|---|---|'
+  local row
+  for row in "${probe_rows[@]}"; do emit "$row"; done
+}
+write_e2e_header() {
+  emit ''
+  emit '## 보정 후 E2E 결과'
+  if [[ "$final_level" = unset ]]; then
+    note '보정 상태: 선행 단계에서 중단되어 결정되지 않음.'
+  else
+    note "보정 상태: 누적 ${final_level}단계 (probe 기준 최종 상태, 보정 없는 기준선 probe는 위 표 참고)."
+  fi
+  emit '### 편차 (DEVIATION)'
+  note 'DEVIATION: CI Postgres 18.4 and Valkey 9.1.2 service containers stand in for the DEV RDS and managed Valkey.'
+  note 'DEVIATION: all secrets are per-run random values in process environments; DEV resolves them from Secrets Manager/SSM.'
+  note 'DEVIATION: CARELOG_INTERNAL_IDENTITY_CLAIMS_ENABLED=true is an env override of the literal false in application-prod.yml:39. DEV must inject the same env; not verifiable from the repo.'
+  note 'DEVIATION: CARELOG_ENVIRONMENT=dev-integration (metrics tag only; DEV value not in repo). Tomcat access log enabled to observe the enrollment PUT.'
+  note 'DEVIATION: unused routes (carelog-be direct, RAG, Kakao OAuth) point at a closed port; they are not exercised.'
+  note 'DEVIATION (L3): CI Postgres uses POSTGRES_HOST_AUTH_METHOD=trust, so DB password checks are not exercised; DEV uses RDS password auth.'
+  note 'DEVIATION (L3): CI Valkey is plaintext with no AUTH; DEV uses managed Valkey with TLS. Redis transport and credentials are not exercised.'
+  note 'DEVIATION: migrations run with the single carelog_e2e owner role. DEV migration role is NOT verifiable from this repo.'
+  if (( ${final_level/unset/0} >= 1 )); then
+    note 'DEVIATION (a): /run/secrets created as an EMPTY directory so the configtree import resolves. DEV supplies no files here.'
+  fi
+  if (( ${final_level/unset/0} >= 2 )); then
+    note 'DEVIATION (b): spring.datasource.hikari.data-source-properties.sslmode=disable (DEV: verify-full with /run/rds-ca.pem). Transport only. verify-full is NOT tested: a self-signed CA and server certificate for the service container were judged too complex for this job.'
+  fi
+  if (( ${final_level/unset/0} >= 3 )); then
+    note 'DEVIATION (c): VALKEY_TLS_ENABLED=false (DEV default true). CI Valkey has no TLS; transport only.'
+  fi
+}
+fail_e2e() {
+  local reason="$1"
+  if (( section1_written == 0 )); then write_probe_section; fi
+  write_e2e_header
+  note "**판정: FAIL.** ${reason}"
+  exit 1
+}
+
+# publish_logs: redacted copies of every run log for the artifact. Runs on every exit path.
+publish_logs() {
+  local f
+  for f in "$log_dir"/*.log "$log_dir/e2e.stderr"; do
+    [[ -f "$f" ]] || continue
+    redact <"$f" >"$artifact_dir/${f##*/}" 2>/dev/null || true
+  done
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
+  # On failure, surface only ERROR/WARN lines (secrets are redacted before printing).
+  if [[ "$status" -ne 0 ]]; then
+    local log
+    for log in "$log_dir"/*.log; do
+      [[ -f "$log" ]] || continue
+      echo "--- ${log##*/}: last ERROR/WARN lines"
+      grep -E ' (ERROR|WARN) ' "$log" | tail -n 40 | redact || true
+    done
+    if compgen -G "$carelog_access_dir/access_log*" >/dev/null; then
+      echo "--- carelog-be access log: method, path, status, Content-Length, Transfer-Encoding only"
+      cat "$carelog_access_dir"/access_log* | awk '{print $1, $2, $3, $4, $5}' | tail -n 60 | redact || true
+    fi
+  fi
+  local pid
+  for pid in "$gateway_pid" "$finance_pid" "$core_pid" "$carelog_pid"; do
+    if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi
+  done
+  wait 2>/dev/null || true
+  publish_logs || true
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+# Step 1: Flyway migration boot. It needs (a)(b)(c) to start on CI service containers, so it runs with all three
+# applied. This is a precondition for the probe, not a DEV-parity claim. The state is reset before the probe.
+set_accommodations 3
 start_carelog migrate true "$carelog_migrate_access_dir" "$valkey_tls"
-wait_ready "$carelog_pid" "$carelog_ready_url" "carelog-be migration boot" || exit 1
+if ! wait_ready "$carelog_pid" "$carelog_ready_url" "carelog-be migration boot"; then
+  fail_e2e 'Flyway 선행 부팅이 readiness에 도달하지 못함 (마스킹된 migrate 로그 artifact 참고).'
+fi
+assert_profile_prod "$log_dir/carelog-migrate.log" || fail_e2e 'L1 assertion failed: migration boot active profile is not prod.'
 kill "$carelog_pid" 2>/dev/null || true
 wait "$carelog_pid" 2>/dev/null || true
+assert_flyway_v9 "$log_dir/carelog-migrate.log" || fail_e2e 'L2 assertion failed: Flyway did not reach v9.'
 flyway_line="$(grep -m1 -E 'Successfully applied|Schema .* is up to date' "$log_dir/carelog-migrate.log" | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+ +//' || true)"
-note "Flyway boot (SPRING_FLYWAY_ENABLED=true, then stopped): ${flyway_line:-no Flyway summary line found}."
-note "DEVIATION: migrations run with the single carelog_e2e owner role. DEV migration role is NOT verifiable from this repo."
+flyway_line="${flyway_line:-Flyway summary line not found}, V9 확인됨"
+set_accommodations 0
 
-# Step 3: runtime carelog-be exactly as the DEV gate requires (SPRING_FLYWAY_ENABLED=false explicitly).
+# Step 2: DEV-parity probe on the migrated DB. Starts from the bare DEV config. Each level adds one remediation
+# and re-probes. Stops at the first level that boots (cumulative remediations needed).
+probe_labels=(
+  '없음 (기준선: DEV 설정 그대로)'
+  '(a) /run/secrets configtree 디렉터리 생성 (빈 디렉터리)'
+  '(b) DB sslmode=disable (DEV: verify-full + /run/rds-ca.pem; CI Postgres는 평문)'
+  '(c) VALKEY_TLS_ENABLED=false (DEV 기본 true; CI Valkey는 평문)'
+)
+for level in 0 1 2 3; do
+  set_accommodations "$level"
+  probe_log="$log_dir/carelog-probe-L$level.log"
+  start_carelog "probe-L$level" false "$carelog_probe_access_dir" "$valkey_tls"
+  probe_pid="$carelog_pid"
+  probe_result=FAIL
+  if wait_ready "$probe_pid" "$carelog_ready_url" "carelog-be DEV probe L$level"; then probe_result=PASS; fi
+  kill "$probe_pid" 2>/dev/null || true
+  wait "$probe_pid" 2>/dev/null || true
+
+  if [[ "$probe_result" = PASS ]]; then
+    if ! assert_profile_prod "$probe_log"; then
+      fail_e2e 'L1 assertion failed: DEV-parity probe active profile is not prod.'
+    fi
+    probe_rows+=("| $level | ${probe_labels[$level]} | PASS | — |")
+    probe_pass_level=$level
+    break
+  fi
+  cause="$(extract_cause "$probe_log")"
+  probe_rows+=("| $level | ${probe_labels[$level]} | FAIL | $(md_cell "$cause") |")
+  annotate_warning "[L$level] ${probe_labels[$level]}: $cause"
+  print_failure_block "$probe_log"
+done
+
+if (( probe_pass_level >= 0 )); then final_level=$probe_pass_level; else final_level=3; fi
+set_accommodations "$final_level"
+write_probe_section
+
+# Step 3: runtime carelog-be with the cumulative remediations, Flyway explicitly off (DEV gate).
 start_carelog runtime false "$carelog_access_dir" "$valkey_tls"
-wait_ready "$carelog_pid" "$carelog_ready_url" "carelog-be runtime" || exit 1
-note "carelog-be runtime: prod profile readiness UP (SPRING_FLYWAY_ENABLED=false, dev-integration environment tag)."
+if ! wait_ready "$carelog_pid" "$carelog_ready_url" "carelog-be runtime"; then
+  fail_e2e "carelog-be 런타임이 readiness에 도달하지 못함 (보정 ${final_level}단계). 누적 보정으로도 기동 실패."
+fi
+assert_profile_prod "$log_dir/carelog-runtime.log" || fail_e2e 'L1 assertion failed: runtime active profile is not prod.'
 
 # platform-core: Carelog auth and Finance reference together. DEV dual-auth opt-in (dev profile required).
 nohup env \
@@ -292,7 +460,8 @@ nohup env \
   PLATFORM_IDENTITY_FINANCE_REFERENCE_JWT_ACCESS_TOKEN_TTL_SECONDS=300 \
   "$JAVA_HOME_21_X64/bin/java" -jar "$core_jar" >"$log_dir/core.log" 2>&1 &
 core_pid=$!
-wait_ready "$core_pid" "http://127.0.0.1:$core_management_port/actuator/health/readiness" Core
+wait_ready "$core_pid" "http://127.0.0.1:$core_management_port/actuator/health/readiness" Core \
+  || fail_e2e 'platform-core가 readiness에 도달하지 못함.'
 
 # gateway-app: Carelog registration and Finance reference routes. Finance is reached via the yml route
 # (Path=/api/finance/**, StripPrefix=1) that PLATFORM_GATEWAY_FINANCE_BE_URI points at.
@@ -345,10 +514,23 @@ nohup env \
   "$JAVA_HOME_21_X64/bin/java" -jar "$finance_jar" >"$log_dir/finance.log" 2>&1 &
 finance_pid=$!
 
-wait_ready "$finance_pid" "http://127.0.0.1:$finance_management_port/actuator/health/readiness" Finance
-wait_ready "$gateway_pid" "http://127.0.0.1:$gateway_management_port/actuator/health/readiness" Gateway
+wait_ready "$finance_pid" "http://127.0.0.1:$finance_management_port/actuator/health/readiness" Finance \
+  || fail_e2e 'finance-harness-be가 readiness에 도달하지 못함.'
+wait_ready "$gateway_pid" "http://127.0.0.1:$gateway_management_port/actuator/health/readiness" Gateway \
+  || fail_e2e 'gateway-app이 readiness에 도달하지 못함.'
 
+# Step 4: verification through the Gateway. Its stdout is the verified-assertion block; stderr carries the stage.
+write_e2e_header
+e2e_rc=0
 E2E_GATEWAY_URL="http://127.0.0.1:$gateway_port" \
 E2E_CARELOG_URL="http://127.0.0.1:$carelog_port" \
 E2E_CARELOG_ACCESS_LOG_DIR="$carelog_access_dir" \
-node "$verifier"
+node "$verifier" 2>"$log_dir/e2e.stderr" || e2e_rc=$?
+cat "$log_dir/e2e.stderr" >&2 || true
+if (( e2e_rc == 0 )); then
+  note '**판정: PASS.**'
+else
+  stage_line="$(redact <"$log_dir/e2e.stderr" | tail -n 1 || true)"
+  note "**판정: FAIL.** ${stage_line:-stage unknown}"
+fi
+exit "$e2e_rc"
