@@ -409,3 +409,66 @@ run "carelog_claims_rejects_plain_http" {
   }
   expect_failures = [var.carelog_claims_origin]
 }
+
+# Live preservation without opt-ins: unset inputs keep the ALB and the previous task shape.
+run "preserve_defaults_keep_alb_and_previous_shape" {
+  command = plan
+
+  assert {
+    condition     = length(aws_lb.gateway) == 1 && var.gateway_preserve.assign_public_ip == false && var.core_preserve.assign_public_ip == false
+    error_message = "Unset preservation inputs must keep the ALB and private, non-public tasks."
+  }
+  assert {
+    condition     = var.gateway_preserve.service_discovery_custom_health_check == true && var.core_preserve.service_discovery_custom_health_check == true
+    error_message = "The Cloud Map custom health check stays declared by default, as on main."
+  }
+}
+
+# Live shape: no ALB, Tunnel sidecar, tasks in private subnets with a public IP, boundaries and trust conditions kept.
+run "live_preserve_no_alb_tunnel_keeps_live_service_settings" {
+  command = plan
+
+  variables {
+    enable_alb             = false
+    certificate_arn        = null
+    alb_ingress_cidrs      = []
+    gateway_readiness_path = null
+    gateway_cloudflared = {
+      image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/cloudflared"
+      token_secret_arn   = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:test-tunnel-abcdef"
+    }
+    gateway_preserve = {
+      assign_public_ip                      = true
+      execution_permissions_boundary_arn    = "arn:aws:iam::111122223333:policy/dev-boundary-execution"
+      task_permissions_boundary_arn         = "arn:aws:iam::111122223333:policy/dev-boundary-task"
+      assume_role_source_conditions         = true
+      service_discovery_custom_health_check = true
+    }
+    core_preserve = {
+      assign_public_ip                      = true
+      execution_permissions_boundary_arn    = "arn:aws:iam::111122223333:policy/dev-boundary-execution"
+      task_permissions_boundary_arn         = "arn:aws:iam::111122223333:policy/dev-boundary-task"
+      assume_role_source_conditions         = true
+      service_discovery_custom_health_check = true
+    }
+  }
+
+  assert {
+    condition     = length(aws_lb.gateway) == 0 && output.gateway_target_group_arn == null && length(aws_vpc_security_group_ingress_rule.gateway_alb) == 0
+    error_message = "Live DEV has no ALB: no load balancer, target group or ALB rule may be planned."
+  }
+  assert {
+    condition     = module.gateway.service_name != null && module.core.service_name != null
+    error_message = "Gateway and Core services must still plan with the live preserve inputs."
+  }
+}
+
+run "preserve_rejects_non_policy_boundary" {
+  command = plan
+
+  variables {
+    core_preserve = { task_permissions_boundary_arn = "dev-boundary-task" }
+  }
+  expect_failures = [var.core_preserve]
+}

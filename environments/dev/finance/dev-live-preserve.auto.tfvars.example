@@ -1,0 +1,36 @@
+# Live DEV preserve values for environments/dev/finance. Copy to dev-live-preserve.auto.tfvars (git-ignored, never commit).
+# No live preserve input is known for this root yet, so none is set here. The runbook OFF plan decides:
+# if it shows any replace or delete, add the matching input (module preserve input) here and to the root, then re-plan.
+# Placeholders only.
+
+region         = "ap-northeast-2"
+aws_account_id = "123456789012"
+
+shared = {
+  vpc_id             = "vpc-REPLACE"
+  private_subnet_ids = ["subnet-REPLACE-a", "subnet-REPLACE-c"]
+  cluster_arn        = "arn:aws:ecs:ap-northeast-2:123456789012:cluster/dev-shared"
+  namespace_id       = "ns-REPLACE"
+}
+
+gateway_security_group_id = "sg-0000000000000000a"
+
+runtime = {
+  image                 = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/finance/api@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  ecr_repository_arn    = "arn:aws:ecr:ap-northeast-2:123456789012:repository/ranikun/finance/api"
+  container_port        = 8080
+  cpu                   = 512
+  memory                = 1024
+  initial_desired_count = 0
+  environment           = {}
+  secrets               = {}
+  execution_secret_arns  = []
+  execution_kms_key_arns = []
+  health_check           = { command = ["CMD-SHELL", "REPLACE_WITH_LIVE_HEALTHCHECK"], interval = 30, timeout = 10, retries = 3, start_period = 300 }
+  log_retention_days     = 30
+}
+
+tags = {
+  Environment = "dev"
+  Owner       = "REPLACE"
+}

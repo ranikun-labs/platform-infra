@@ -92,60 +92,68 @@ locals {
   }] : []
 }
 module "gateway" {
-  source                    = "../../../modules/ecs-service"
-  region                    = var.aws_region
-  name                      = "${var.name_prefix}-gateway"
-  cluster_arn               = var.cluster_arn
-  vpc_id                    = var.vpc_id
-  private_subnet_ids        = var.workload_public_ip ? var.public_subnet_ids : var.private_subnet_ids
-  assign_public_ip          = var.workload_public_ip
-  namespace_id              = var.namespace_id
-  image                     = var.gateway_runtime.image
-  ecr_repository_arn        = var.gateway_runtime.ecr_repository_arn
-  container_port            = 8080
-  cpu                       = var.gateway_runtime.cpu
-  memory                    = var.gateway_runtime.memory
-  desired_count             = var.gateway_desired_count
-  first_task_definition_arn = var.gateway_first_task_definition_arn
-  target_group_arn          = var.enable_alb ? aws_lb_target_group.gateway[0].arn : null
-  environment               = local.gateway_container_environment
-  secrets                   = local.gateway_container_secrets
-  execution_secret_arns     = local.gateway_container_execution
-  execution_kms_key_arns    = var.gateway_runtime.execution_kms_key_arns
-  health_check              = var.gateway_runtime.health_check
-  log_retention_days        = var.gateway_runtime.log_retention_days
-  tags                      = var.tags
-  cloudflared               = var.gateway_cloudflared
-  depends_on                = [aws_lb_listener.https]
+  source                                = "../../../modules/ecs-service"
+  region                                = var.aws_region
+  name                                  = "${var.name_prefix}-gateway"
+  cluster_arn                           = var.cluster_arn
+  vpc_id                                = var.vpc_id
+  private_subnet_ids                    = var.workload_public_ip ? var.public_subnet_ids : var.private_subnet_ids
+  assign_public_ip                      = var.workload_public_ip || var.gateway_preserve.assign_public_ip
+  namespace_id                          = var.namespace_id
+  image                                 = var.gateway_runtime.image
+  ecr_repository_arn                    = var.gateway_runtime.ecr_repository_arn
+  container_port                        = 8080
+  cpu                                   = var.gateway_runtime.cpu
+  memory                                = var.gateway_runtime.memory
+  desired_count                         = var.gateway_desired_count
+  first_task_definition_arn             = var.gateway_first_task_definition_arn
+  target_group_arn                      = var.enable_alb ? aws_lb_target_group.gateway[0].arn : null
+  environment                           = local.gateway_container_environment
+  secrets                               = local.gateway_container_secrets
+  execution_secret_arns                 = local.gateway_container_execution
+  execution_kms_key_arns                = var.gateway_runtime.execution_kms_key_arns
+  health_check                          = var.gateway_runtime.health_check
+  log_retention_days                    = var.gateway_runtime.log_retention_days
+  tags                                  = var.tags
+  cloudflared                           = var.gateway_cloudflared
+  depends_on                            = [aws_lb_listener.https]
+  execution_permissions_boundary_arn    = var.gateway_preserve.execution_permissions_boundary_arn
+  task_permissions_boundary_arn         = var.gateway_preserve.task_permissions_boundary_arn
+  assume_role_source_conditions         = var.gateway_preserve.assume_role_source_conditions
+  service_discovery_custom_health_check = var.gateway_preserve.service_discovery_custom_health_check
 }
 module "core" {
-  source                         = "../../../modules/ecs-service"
-  region                         = var.aws_region
-  name                           = "${var.name_prefix}-core"
-  cluster_arn                    = var.cluster_arn
-  vpc_id                         = var.vpc_id
-  private_subnet_ids             = var.workload_public_ip ? var.public_subnet_ids : var.private_subnet_ids
-  assign_public_ip               = var.workload_public_ip
-  namespace_id                   = var.namespace_id
-  image                          = var.core_runtime.image
-  ecr_repository_arn             = var.core_runtime.ecr_repository_arn
-  container_port                 = 8081
-  cpu                            = var.core_runtime.cpu
-  memory                         = var.core_runtime.memory
-  desired_count                  = var.core_desired_count
-  first_task_definition_arn      = var.core_first_task_definition_arn
-  environment                    = local.core_container_environment
-  secrets                        = local.core_container_secrets
-  execution_secret_arns          = local.core_container_execution
-  execution_kms_key_arns         = var.core_runtime.execution_kms_key_arns
-  health_check                   = var.core_runtime.health_check
-  log_retention_days             = var.core_runtime.log_retention_days
-  volume_names                   = local.core_truststore_on ? toset([local.core_truststore_volume]) : toset([])
-  app_mount_points               = local.core_truststore_on ? [{ source_volume = local.core_truststore_volume, container_path = "/run/carelog-trust", read_only = true }] : []
-  additional_containers          = local.core_trust_init_containers
-  additional_ecr_repository_arns = local.core_truststore_on ? toset([var.core_truststore.ecr_repository_arn]) : toset([])
-  app_depends_on                 = local.core_truststore_on ? [{ container_name = local.core_trust_init_name, condition = "SUCCESS" }] : []
-  tags                           = var.tags
+  source                                = "../../../modules/ecs-service"
+  region                                = var.aws_region
+  name                                  = "${var.name_prefix}-core"
+  cluster_arn                           = var.cluster_arn
+  vpc_id                                = var.vpc_id
+  private_subnet_ids                    = var.workload_public_ip ? var.public_subnet_ids : var.private_subnet_ids
+  assign_public_ip                      = var.workload_public_ip || var.core_preserve.assign_public_ip
+  namespace_id                          = var.namespace_id
+  image                                 = var.core_runtime.image
+  ecr_repository_arn                    = var.core_runtime.ecr_repository_arn
+  container_port                        = 8081
+  cpu                                   = var.core_runtime.cpu
+  memory                                = var.core_runtime.memory
+  desired_count                         = var.core_desired_count
+  first_task_definition_arn             = var.core_first_task_definition_arn
+  environment                           = local.core_container_environment
+  secrets                               = local.core_container_secrets
+  execution_secret_arns                 = local.core_container_execution
+  execution_kms_key_arns                = var.core_runtime.execution_kms_key_arns
+  health_check                          = var.core_runtime.health_check
+  log_retention_days                    = var.core_runtime.log_retention_days
+  volume_names                          = local.core_truststore_on ? toset([local.core_truststore_volume]) : toset([])
+  app_mount_points                      = local.core_truststore_on ? [{ source_volume = local.core_truststore_volume, container_path = "/run/carelog-trust", read_only = true }] : []
+  additional_containers                 = local.core_trust_init_containers
+  additional_ecr_repository_arns        = local.core_truststore_on ? toset([var.core_truststore.ecr_repository_arn]) : toset([])
+  app_depends_on                        = local.core_truststore_on ? [{ container_name = local.core_trust_init_name, condition = "SUCCESS" }] : []
+  tags                                  = var.tags
+  execution_permissions_boundary_arn    = var.core_preserve.execution_permissions_boundary_arn
+  task_permissions_boundary_arn         = var.core_preserve.task_permissions_boundary_arn
+  assume_role_source_conditions         = var.core_preserve.assume_role_source_conditions
+  service_discovery_custom_health_check = var.core_preserve.service_discovery_custom_health_check
 }
 resource "aws_vpc_security_group_egress_rule" "alb_gateway" {
   for_each                     = var.enable_alb ? toset(["8080", "9091"]) : toset([])

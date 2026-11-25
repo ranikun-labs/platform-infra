@@ -171,3 +171,41 @@ variable "dev_dual_auth" {
     error_message = "finance_service_name must be a Cloud Map DNS label and finance_container_port a valid TCP port."
   }
 }
+
+# Live DEV preservation for the Gateway and Core services. Defaults equal the module's previous behavior, so an unset
+# input plans as before. Values come from the deployed services (see dev-live-preserve.auto.tfvars.example).
+variable "gateway_preserve" {
+  description = "Preserved settings of the deployed Gateway service. Public IP without subnet change, IAM boundaries and trust conditions, Cloud Map health check."
+  type = object({
+    assign_public_ip                      = optional(bool, false)
+    execution_permissions_boundary_arn    = optional(string)
+    task_permissions_boundary_arn         = optional(string)
+    assume_role_source_conditions         = optional(bool, false)
+    service_discovery_custom_health_check = optional(bool, true)
+  })
+  default = {}
+  validation {
+    condition = alltrue([for a in [
+      var.gateway_preserve.execution_permissions_boundary_arn, var.gateway_preserve.task_permissions_boundary_arn,
+    ] : a == null || can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", a))])
+    error_message = "Permissions boundaries must be IAM policy ARNs."
+  }
+}
+
+variable "core_preserve" {
+  description = "Preserved settings of the deployed Core service. Same fields as gateway_preserve."
+  type = object({
+    assign_public_ip                      = optional(bool, false)
+    execution_permissions_boundary_arn    = optional(string)
+    task_permissions_boundary_arn         = optional(string)
+    assume_role_source_conditions         = optional(bool, false)
+    service_discovery_custom_health_check = optional(bool, true)
+  })
+  default = {}
+  validation {
+    condition = alltrue([for a in [
+      var.core_preserve.execution_permissions_boundary_arn, var.core_preserve.task_permissions_boundary_arn,
+    ] : a == null || can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", a))])
+    error_message = "Permissions boundaries must be IAM policy ARNs."
+  }
+}
