@@ -8,7 +8,7 @@ variable "aws_account_id" {
   }
 }
 # Supply only the required shared/platform outputs, not their entire state.
-# namespace_name is only used for the carelog_private_origin output.
+# namespace_name builds the TLS origin host and the proxy SAN (required when https_enrollment is set).
 variable "shared" {
   type = object({
     vpc_id             = string
@@ -52,6 +52,10 @@ variable "carelog_core_auth" {
   validation {
     condition     = var.carelog_core_auth.https_enrollment == null || var.carelog_core_auth.enabled
     error_message = "carelog_core_auth.https_enrollment requires carelog_core_auth.enabled = true."
+  }
+  validation {
+    condition     = var.carelog_core_auth.https_enrollment == null || var.shared.namespace_name != null
+    error_message = "https_enrollment needs shared.namespace_name: the TLS origin host and proxy SAN are <service>.<namespace>."
   }
   validation {
     condition = var.carelog_core_auth.https_enrollment == null || (
@@ -139,5 +143,16 @@ variable "workload_public_subnet_ids" {
   validation {
     condition     = !var.workload_public_ip || length(var.workload_public_subnet_ids) > 0
     error_message = "Public IP tasks require explicit public subnets."
+  }
+}
+
+# Keep null. Overrides the Cloud Map and ECS service name (default dev-carelog). A different value renames live
+# resources, so the naming and state decision is pending.
+variable "service_name_override" {
+  type    = string
+  default = null
+  validation {
+    condition     = var.service_name_override == null || can(regex("^[a-z][a-z0-9-]{0,62}$", var.service_name_override))
+    error_message = "service_name_override must be a lowercase DNS label."
   }
 }

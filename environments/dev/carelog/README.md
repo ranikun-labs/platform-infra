@@ -43,12 +43,12 @@ With the opt-in enabled, `runtime.environment` must set `SPRING_DATASOURCE_URL` 
 
 ### Core-side origin
 
-`output carelog_private_origin` = `http://dev-carelog.<namespace_name>:8080`. Supply `shared.namespace_name` to get it (null otherwise). It has **no path**: Core adapters append `/api/v1/...` themselves, so the Core settings are:
+`output carelog_private_https_origin` = `https://dev-carelog.<namespace_name>:8443` (null unless `https_enrollment` is set). Core uses this one origin for both enrollment and product claims, because the TLS listener serves both paths. It has **no path**: Core adapters append `/api/v1/...` themselves.
 
-- `PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL=<carelog_private_origin>`. Auth: `Authorization: Bearer <value of CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET>`. Do not send `X-Service-Id`, `X-Service-Secret`, `X-Gateway-Secret`, `X-User-Id`, `X-Organization-Id`, `X-Role` or `X-Public-Id` on this path; the filter returns 403.
-- `PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL=<carelog_private_origin>`. Auth: `X-Service-Id: platform-identity` and `X-Service-Secret: <value of CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET>`.
-
-Cloud Map gives plain HTTP inside the VPC, matching Gateway-to-Core today.
+- `PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL=<carelog_private_https_origin>`. Auth: `Authorization: Bearer <value of CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET>`. Path `PUT /api/v1/internal/v1/identity/carelog/enrollments/{accountId}`.
+- `PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL=<carelog_private_https_origin>`. Auth: `X-Service-Id: platform-identity` and `X-Service-Secret: <value of CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET>`. Path `GET /api/v1/internal/identity/claims/{accountId}`.
+- The host is `<service_name>.<namespace_name>`. The server certificate SAN must contain it, and the proxy checks it through `TLS_EXPECTED_DNS_SAN`. `service_name_override` is the one input for a different name (not set; naming decision pending).
+- No Core SG rule on the product port. Core reaches only 8443.
 
 ### /run/rds-ca.pem
 
@@ -56,16 +56,25 @@ Cloud Map gives plain HTTP inside the VPC, matching Gateway-to-Core today.
 
 ### Open items
 
-- HTTPS: Cloud Map gives plain HTTP. Private HTTPS needs one of: ACM Private CA with ECS Service Connect TLS (not provisioned here), or an internal ALB with a publicly trusted ACM certificate on a domain the project controls (needs a Route 53 private zone and domain). Until one is chosen, Bearer and claims secrets travel in cleartext on the private VPC, as Gateway-to-Core does today. This is a security decision for the owner.
+- HTTPS: with `https_enrollment` the Core path is TLS on 8443. Without it, Core has no route to Carelog. The CA source (ACM Private CA vs self-managed) is still open. Secrets travel encrypted only once that listener is enabled.
 - Secret ARNs and env values are supplied by the operator. This root does not create them.
 - `CARELOG_ENVIRONMENT` is `dev` in this root (the carelog-be default is `production`).
 
 ## Private HTTPS enrollment listener (opt-in)
 
-`carelog_core_auth.https_enrollment` (requires `carelog_core_auth.enabled`) adds a TLS sidecar `carelog-tls-proxy`:
-- Listens on task IP `8443` only and forwards to the app on `127.0.0.1:8080`. The app keeps its `8080` mapping, so Gateway and Core claims traffic is unchanged.
+`carelog_core_auth.https_enrollment` (requires `carelog_core_auth.enabled` and `shared.namespace_name`) adds the TLS sidecar `carelog-tls-proxy`:
+- Listens on the task IP `8443` only (TLS). Upstream is the app on `127.0.0.1:8080`. The app keeps its `8080` mapping for Gateway traffic (Gateway SG unchanged). Core has no rule on `8080`.
 - Core reaches it through the SG rule on `8443` from `carelog_core_auth.core_security_group_id` only.
-- Inputs are ARNs and a digest-pinned image only. `server_bundle_secret_arn` holds the certificate and key bundle, read as `TLS_BUNDLE_JSON`.
-- Output `carelog_private_https_origin` = `https://dev-carelog.<namespace>:8443`. The host must be in the server certificate SAN. Core enrollment uses it. Claims keep `carelog_private_origin` (`http://...:8080`).
+- Inputs are ARNs and a digest-pinned image only. `server_bundle_secret_arn` holds the certificate and key bundle, read as `TLS_BUNDLE_JSON`. The sidecar gets `TLS_EXPECTED_DNS_SAN=<service>.<namespace>`.
 
-Required proxy image contract (the image source is not in this branch): TLS-only listener on `TASK_IP:8443`, upstream `127.0.0.1:8080`, no `8080` listener on the task IP, and the enrollment path only (`PUT /api/v1/internal/v1/identity/carelog/enrollments/{id}`) with normalized-path checks. The candidate in platform-infra `origin/codex/carelog-dev-tls-preserve-review` `candidates/carelog-tls/` binds `8080` on the task IP and sets `SERVER_ADDRESS=127.0.0.1`, so it cannot be used as-is.
+### Proxy image contract (the image is not built in this branch)
+
+The image source is not in this branch. The platform-infra candidate `origin/codex/carelog-dev-tls-preserve-review` `candidates/carelog-tls/` binds `8080` on the task IP and sets `SERVER_ADDRESS=127.0.0.1`, so it cannot be used as-is. The image must:
+- Listen TLS on `TASK_IP:8443` only. No plaintext listener, and no listener on `8080` on the task IP.
+- Proxy to `127.0.0.1:8080`.
+- Serve the certificate from the bundle, and fail to start unless the certificate SAN contains `TLS_EXPECTED_DNS_SAN`.
+- Allow only these paths, with segment-bounded matching and normalization. Reject everything else with 403:
+  - `PUT /api/v1/internal/v1/identity/carelog/enrollments/{accountId}`
+  - `GET /api/v1/internal/identity/claims/{accountId}`
+- Pass the request through unchanged for the allowed paths.
+- Be digest-pinned in ECR. The health check is the command in `main.tf`.

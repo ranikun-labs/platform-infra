@@ -72,7 +72,7 @@ run "default_container_matches_baseline" {
     error_message = "With carelog_core_auth disabled the container secrets must equal runtime.secrets."
   }
   assert {
-    condition     = !contains(keys(jsondecode(module.service.baseline_container_definitions)[0]), "mountPoints") && length(aws_vpc_security_group_ingress_rule.core) == 0
+    condition     = !contains(keys(jsondecode(module.service.baseline_container_definitions)[0]), "mountPoints")
     error_message = "With carelog_core_auth disabled there must be no /run/secrets mount and no Core ingress."
   }
 }
@@ -100,10 +100,6 @@ run "core_auth_enabled_applies_prod_contract" {
   assert {
     condition     = jsondecode(module.service.baseline_container_definitions)[0].mountPoints == [{ sourceVolume = "runtime-config", containerPath = "/run/secrets", readOnly = true }]
     error_message = "Enabled Core auth must mount runtime-config read-only at /run/secrets."
-  }
-  assert {
-    condition     = length(aws_vpc_security_group_ingress_rule.core) == 1 && aws_vpc_security_group_ingress_rule.core[0].referenced_security_group_id == "sg-0123456789abcdef1" && aws_vpc_security_group_ingress_rule.core[0].from_port == 8080
-    error_message = "Only the supplied Core security group may reach the product port through the Core rule."
   }
 }
 
@@ -153,7 +149,7 @@ run "core_auth_rejects_shared_enrollment_and_claims_secret" {
   expect_failures = [var.runtime]
 }
 
-run "private_origin_has_no_path" {
+run "https_origin_null_without_listener" {
   command = plan
 
   variables {
@@ -161,8 +157,8 @@ run "private_origin_has_no_path" {
   }
 
   assert {
-    condition     = output.carelog_private_origin == "http://dev-carelog.dev.internal:8080"
-    error_message = "Core must receive the origin only (scheme, host, port); Core appends /api/v1 itself."
+    condition     = output.carelog_private_https_origin == null
+    error_message = "Without https_enrollment there is no Core origin; no plaintext origin is exported."
   }
 }
 
@@ -185,8 +181,8 @@ run "https_enrollment_sidecar_plans_listener" {
   }
 
   assert {
-    condition     = output.carelog_private_https_origin == "https://dev-carelog.dev.internal:8443" && output.carelog_private_origin == "http://dev-carelog.dev.internal:8080"
-    error_message = "HTTPS enrollment origin must use port 8443 with the Cloud Map host; the claims origin stays on the product port."
+    condition     = output.carelog_private_https_origin == "https://dev-carelog.dev.internal:8443"
+    error_message = "Core enrollment and claims share one HTTPS origin on port 8443 with the Cloud Map host."
   }
   assert {
     condition     = length([for c in jsondecode(module.service.baseline_container_definitions) : c if c.name == "carelog-tls-proxy"]) == 1
@@ -199,6 +195,10 @@ run "https_enrollment_sidecar_plans_listener" {
   assert {
     condition     = length(aws_vpc_security_group_ingress_rule.core_enrollment_tls) == 1 && aws_vpc_security_group_ingress_rule.core_enrollment_tls[0].from_port == 8443 && aws_vpc_security_group_ingress_rule.core_enrollment_tls[0].referenced_security_group_id == "sg-0123456789abcdef1"
     error_message = "Only the Core security group may reach 8443."
+  }
+  assert {
+    condition     = [for e in jsondecode(module.service.baseline_container_definitions)[1].environment : e.value if e.name == "TLS_EXPECTED_DNS_SAN"] == ["dev-carelog.dev.internal"]
+    error_message = "The proxy must check the certificate SAN against the same host Core uses."
   }
 }
 
@@ -228,6 +228,57 @@ run "https_enrollment_rejects_unpinned_image" {
       core_security_group_id = "sg-0123456789abcdef1"
       https_enrollment = {
         proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy:latest"
+        ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
+        server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+      }
+    }
+  }
+  expect_failures = [var.carelog_core_auth]
+}
+
+# One input renames the service and moves the SAN, the origin host and the log group together.
+run "service_name_override_moves_one_source" {
+  command = plan
+
+  variables {
+    shared                = merge(var.shared, { namespace_name = "dev.internal" })
+    service_name_override = "ranikun-carelog-dev-api"
+    carelog_core_auth = {
+      enabled                = true
+      valkey_tls_enabled     = true
+      core_security_group_id = "sg-0123456789abcdef1"
+      https_enrollment = {
+        proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
+        server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+      }
+    }
+  }
+
+  assert {
+    condition     = output.carelog_private_https_origin == "https://ranikun-carelog-dev-api.dev.internal:8443"
+    error_message = "The origin host must follow the single service-name source."
+  }
+  assert {
+    condition     = [for e in jsondecode(module.service.baseline_container_definitions)[1].environment : e.value if e.name == "TLS_EXPECTED_DNS_SAN"] == ["ranikun-carelog-dev-api.dev.internal"]
+    error_message = "The proxy SAN must follow the same service-name source as the origin."
+  }
+  assert {
+    condition     = jsondecode(module.service.baseline_container_definitions)[1].logConfiguration.options["awslogs-group"] == "/ecs/ranikun-carelog-dev-api"
+    error_message = "The sidecar log group must follow the service name."
+  }
+}
+
+run "https_enrollment_requires_namespace" {
+  command = plan
+
+  variables {
+    carelog_core_auth = {
+      enabled                = true
+      valkey_tls_enabled     = true
+      core_security_group_id = "sg-0123456789abcdef1"
+      https_enrollment = {
+        proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
         server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
       }

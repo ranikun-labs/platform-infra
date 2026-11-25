@@ -19,18 +19,24 @@ locals {
   tls_enabled = var.carelog_core_auth.enabled && var.carelog_core_auth.https_enrollment != null
   tls_volume  = "carelog-tls"
   tls_port    = 8443
+  # Single source for the Cloud Map / ECS service name, the cert SAN and the Core origin host.
+  # service_name_override is for a later naming decision and is intentionally unset.
+  service_name = coalesce(var.service_name_override, "dev-carelog")
+  tls_dns_name = var.shared.namespace_name == null ? null : "${local.service_name}.${var.shared.namespace_name}"
   # Cloud Map name of the Carelog service (module name below). Core verifies this host against the certificate SAN.
   tls_container = local.tls_enabled ? [{
     name         = "carelog-tls-proxy"
     image        = var.carelog_core_auth.https_enrollment.proxy_image
     essential    = true
     portMappings = [{ containerPort = local.tls_port, protocol = "tcp" }]
-    mountPoints  = [{ sourceVolume = local.tls_volume, containerPath = "/run/carelog-tls", readOnly = false }]
-    secrets      = [{ name = "TLS_BUNDLE_JSON", valueFrom = var.carelog_core_auth.https_enrollment.server_bundle_secret_arn }]
+    # Proxy checks the served certificate against this name (SAN). Same value as the Core origin host.
+    environment = [{ name = "TLS_EXPECTED_DNS_SAN", value = local.tls_dns_name }]
+    mountPoints = [{ sourceVolume = local.tls_volume, containerPath = "/run/carelog-tls", readOnly = false }]
+    secrets     = [{ name = "TLS_BUNDLE_JSON", valueFrom = var.carelog_core_auth.https_enrollment.server_bundle_secret_arn }]
     logConfiguration = {
       logDriver = "awslogs"
       options = {
-        awslogs-group         = "/ecs/dev-carelog"
+        awslogs-group         = "/ecs/${local.service_name}"
         awslogs-region        = var.region
         awslogs-stream-prefix = "tls-proxy"
       }
@@ -50,7 +56,7 @@ locals {
 module "service" {
   source                         = "../../../modules/ecs-service"
   region                         = var.region
-  name                           = "dev-carelog"
+  name                           = local.service_name
   cluster_arn                    = var.shared.cluster_arn
   vpc_id                         = var.shared.vpc_id
   private_subnet_ids             = var.workload_public_ip ? var.workload_public_subnet_ids : var.shared.private_subnet_ids
@@ -91,7 +97,7 @@ resource "aws_vpc_security_group_ingress_rule" "gateway" {
   description                  = "Gateway to carelog"
 }
 
-# Core reaches the TLS enrollment listener only (8443, enrollment path). Claims stay on the product port.
+# Core reaches the TLS listener only (8443: enrollment PUT and claims GET). No Core rule on the product port.
 resource "aws_vpc_security_group_ingress_rule" "core_enrollment_tls" {
   count                        = local.tls_enabled ? 1 : 0
   security_group_id            = module.service.security_group_id
@@ -104,12 +110,3 @@ resource "aws_vpc_security_group_ingress_rule" "core_enrollment_tls" {
 
 # Core calls carelog enrollment (PUT) and internal claims (GET) on the product port.
 # Each endpoint is separately guarded by its own bearer secret in the application.
-resource "aws_vpc_security_group_ingress_rule" "core" {
-  count                        = var.carelog_core_auth.enabled ? 1 : 0
-  security_group_id            = module.service.security_group_id
-  referenced_security_group_id = var.carelog_core_auth.core_security_group_id
-  ip_protocol                  = "tcp"
-  from_port                    = var.runtime.container_port
-  to_port                      = var.runtime.container_port
-  description                  = "Core to carelog enrollment and claims"
-}
