@@ -86,7 +86,8 @@ run "core_auth_enabled_applies_prod_contract" {
       enabled                = true
       valkey_tls_enabled     = true
       core_security_group_id = "sg-0123456789abcdef1"
-      https_enrollment       = { proxy_image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy", server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle" }
+      https_enrollment = { proxy_image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy", server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+      root_ca_pem = "-----BEGIN CERTIFICATE-----\nMIIBtestrootpublic\n-----END CERTIFICATE-----" }
     }
   }
 
@@ -129,7 +130,8 @@ run "core_auth_rejects_plaintext_secret_values" {
   variables {
     shared = merge(var.shared, { namespace_name = "dev.internal" })
     carelog_core_auth = { enabled = true, valkey_tls_enabled = true, core_security_group_id = "sg-0123456789abcdef1"
-    https_enrollment = { proxy_image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy", server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle" } }
+      https_enrollment = { proxy_image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy", server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+    root_ca_pem = "-----BEGIN CERTIFICATE-----\nMIIBtestrootpublic\n-----END CERTIFICATE-----" } }
     runtime = merge(var.runtime, {
       secrets = merge(var.runtime.secrets, { JWT_SECRET_KEY = "not-an-arn-plaintext-value" })
     })
@@ -144,7 +146,8 @@ run "core_auth_rejects_shared_enrollment_and_claims_secret" {
   variables {
     shared = merge(var.shared, { namespace_name = "dev.internal" })
     carelog_core_auth = { enabled = true, valkey_tls_enabled = true, core_security_group_id = "sg-0123456789abcdef1"
-    https_enrollment = { proxy_image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy", server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle" } }
+      https_enrollment = { proxy_image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy", server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+    root_ca_pem = "-----BEGIN CERTIFICATE-----\nMIIBtestrootpublic\n-----END CERTIFICATE-----" } }
     runtime = merge(var.runtime, {
       secrets = merge(var.runtime.secrets, {
         CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/enrollment"
@@ -182,6 +185,7 @@ run "https_enrollment_sidecar_plans_listener" {
         proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
         server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+        root_ca_pem              = "-----BEGIN CERTIFICATE-----\nMIIBtestrootpublic\n-----END CERTIFICATE-----"
       }
     }
   }
@@ -218,6 +222,7 @@ run "https_enrollment_requires_core_auth" {
         proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
         server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+        root_ca_pem              = "-----BEGIN CERTIFICATE-----\nMIIBtestrootpublic\n-----END CERTIFICATE-----"
       }
     }
   }
@@ -236,6 +241,7 @@ run "https_enrollment_rejects_unpinned_image" {
         proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy:latest"
         ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
         server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+        root_ca_pem              = "-----BEGIN CERTIFICATE-----\nMIIBtestrootpublic\n-----END CERTIFICATE-----"
       }
     }
   }
@@ -257,6 +263,7 @@ run "service_name_override_moves_one_source" {
         proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
         server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+        root_ca_pem              = "-----BEGIN CERTIFICATE-----\nMIIBtestrootpublic\n-----END CERTIFICATE-----"
       }
     }
   }
@@ -287,6 +294,7 @@ run "https_enrollment_requires_namespace" {
         proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
         server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+        root_ca_pem              = "-----BEGIN CERTIFICATE-----\nMIIBtestrootpublic\n-----END CERTIFICATE-----"
       }
     }
   }
@@ -361,6 +369,7 @@ run "preserved_config_volume_replaces_opt_in_volume" {
         proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
         server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+        root_ca_pem              = "-----BEGIN CERTIFICATE-----\nMIIBtestrootpublic\n-----END CERTIFICATE-----"
       }
     }
   }
@@ -378,4 +387,96 @@ run "preserve_rejects_non_policy_boundary" {
     preserve = { execution_permissions_boundary_arn = "dev-boundary-execution" }
   }
   expect_failures = [var.preserve]
+}
+
+# Loopback flags follow the preserved claims rule. Enrollment is loopback-only whenever the TLS listener exists.
+run "loopback_claims_open_while_core_claims_rule_exists" {
+  command = plan
+
+  variables {
+    shared                = merge(var.shared, { namespace_name = "dev.internal" })
+    service_name_override = "ranikun-carelog-dev-api"
+    preserve = {
+      core_claims_security_group_id = "sg-0123456789abcdef1"
+    }
+    carelog_core_auth = {
+      enabled                = true
+      valkey_tls_enabled     = true
+      core_security_group_id = "sg-0123456789abcdef1"
+      https_enrollment = {
+        proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
+        server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+        root_ca_pem              = "-----BEGIN CERTIFICATE-----\nMIIBtestrootpublic\n-----END CERTIFICATE-----"
+      }
+    }
+  }
+
+  assert {
+    condition     = [for e in jsondecode(module.service.baseline_container_definitions)[0].environment : e.value if e.name == "CARELOG_INTERNAL_LOOPBACK_ONLY_ENABLED"] == ["true"]
+    error_message = "Enrollment PUT must be loopback-only when the TLS listener exists."
+  }
+  assert {
+    condition     = [for e in jsondecode(module.service.baseline_container_definitions)[0].environment : e.value if e.name == "CARELOG_INTERNAL_CLAIMS_LOOPBACK_ONLY_ENABLED"] == ["false"]
+    error_message = "Claims must stay open on 8080 while the preserved core_claims rule exists (old Core rev:3 window)."
+  }
+  assert {
+    condition     = [for e in jsondecode(module.service.baseline_container_definitions)[1].environment : e.value if e.name == "TLS_ROOT_CA_PEM"] == ["-----BEGIN CERTIFICATE-----\nMIIBtestrootpublic\n-----END CERTIFICATE-----"] && [for e in jsondecode(module.service.baseline_container_definitions)[1].environment : e.value if e.name == "TWO_TIER_REQUIRED"] == ["true"]
+    error_message = "The proxy must receive the public root and TWO_TIER_REQUIRED=true."
+  }
+  assert {
+    condition     = jsondecode(module.service.baseline_container_definitions)[1].name == "carelog-tls-proxy" && output.carelog_private_https_origin == "https://ranikun-carelog-dev-api.dev.internal:8443"
+    error_message = "Proxy container name and the Core origin must follow the single service-name source."
+  }
+}
+
+run "loopback_claims_only_after_core_claims_rule_cleared" {
+  command = plan
+
+  variables {
+    shared = merge(var.shared, { namespace_name = "dev.internal" })
+    preserve = {
+      core_claims_security_group_id = null
+    }
+    carelog_core_auth = {
+      enabled                = true
+      valkey_tls_enabled     = true
+      core_security_group_id = "sg-0123456789abcdef1"
+      https_enrollment = {
+        proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
+        server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+        root_ca_pem              = "-----BEGIN CERTIFICATE-----\nMIIBtestrootpublic\n-----END CERTIFICATE-----"
+      }
+    }
+  }
+
+  assert {
+    condition     = [for e in jsondecode(module.service.baseline_container_definitions)[0].environment : e.value if e.name == "CARELOG_INTERNAL_CLAIMS_LOOPBACK_ONLY_ENABLED"] == ["true"]
+    error_message = "With the core_claims rule cleared, claims must become loopback-only."
+  }
+  assert {
+    condition     = length(aws_vpc_security_group_ingress_rule.core_claims) == 0
+    error_message = "Clearing the transition input must remove the 8080 Core claims rule."
+  }
+}
+
+run "root_ca_rejects_private_key_material" {
+  command = plan
+
+  variables {
+    shared = merge(var.shared, { namespace_name = "dev.internal" })
+    carelog_core_auth = {
+      enabled                = true
+      valkey_tls_enabled     = true
+      core_security_group_id = "sg-0123456789abcdef1"
+      https_enrollment = {
+        proxy_image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/carelog-tls-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:111122223333:repository/carelog-tls-proxy"
+        server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog/tls-bundle"
+        root_ca_pem              = "-----BEGIN PRIVATE KEY-----\nMIIBkey\n-----END PRIVATE KEY-----"
+      }
+    }
+  }
+  expect_failures = [var.carelog_core_auth]
 }

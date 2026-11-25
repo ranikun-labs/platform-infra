@@ -2,15 +2,19 @@ locals {
   # carelog-be prod profile contract for DEV, applied only with carelog_core_auth.enabled. These win over
   # runtime.environment. Sources: application-prod.yml, EnrollmentController (@ConditionalOnProperty
   # carelog.identity.enrollment.enabled), InternalIdentityClaimsController.
-  core_auth_environment = var.carelog_core_auth.enabled ? {
-    SPRING_PROFILES_ACTIVE                   = "prod"
-    CARELOG_ENVIRONMENT                      = "dev"
-    CARELOG_FLYWAY_ENABLED                   = "false"
-    SPRING_FLYWAY_ENABLED                    = "false"
-    VALKEY_TLS_ENABLED                       = tostring(var.carelog_core_auth.valkey_tls_enabled)
-    CARELOG_IDENTITY_ENROLLMENT_ENABLED      = "true"
-    CARELOG_INTERNAL_IDENTITY_CLAIMS_ENABLED = "true"
-  } : {}
+  # Loopback flags (carelog-be f03f178, docs/operations/internal-loopback-boundary.md). Enrollment PUT is loopback-only
+  # whenever the TLS listener exists (core auth requires it). Claims stay open on 8080 while the preserved core_claims
+  # SG rule exists (old Core rev:3 calls claims over 8080). Clearing that rule flips claims to loopback-only.
+  core_auth_environment = var.carelog_core_auth.enabled ? merge({
+    SPRING_PROFILES_ACTIVE                        = "prod"
+    CARELOG_ENVIRONMENT                           = "dev"
+    CARELOG_FLYWAY_ENABLED                        = "false"
+    SPRING_FLYWAY_ENABLED                         = "false"
+    VALKEY_TLS_ENABLED                            = tostring(var.carelog_core_auth.valkey_tls_enabled)
+    CARELOG_IDENTITY_ENROLLMENT_ENABLED           = "true"
+    CARELOG_INTERNAL_IDENTITY_CLAIMS_ENABLED      = "true"
+    CARELOG_INTERNAL_CLAIMS_LOOPBACK_ONLY_ENABLED = tostring(var.preserve.core_claims_security_group_id == null)
+  }, local.tls_enabled ? { CARELOG_INTERNAL_LOOPBACK_ONLY_ENABLED = "true" } : {}) : {}
   # /run/secrets is required by the prod configtree import (spring.config.import, non-optional).
   runtime_config_volume = "runtime-config"
   # Live config volume. preserve.config_volume_name keeps the live one (mounted at /run/secrets) with the opt-in off;
@@ -33,7 +37,13 @@ locals {
     essential    = true
     portMappings = [{ containerPort = local.tls_port, protocol = "tcp" }]
     # Proxy checks the served certificate against this name (SAN). Same value as the Core origin host.
-    environment = [{ name = "TLS_EXPECTED_DNS_SAN", value = local.tls_dns_name }]
+    # Proxy inputs per the image contract (candidates/carelog-tls-8443/proxy/proxy-entrypoint.sh). The root CA is public.
+    # Two-tier is required: the served chain must be leaf + issuing CA and verify to the public root.
+    environment = [
+      { name = "TLS_EXPECTED_DNS_SAN", value = local.tls_dns_name },
+      { name = "TLS_ROOT_CA_PEM", value = var.carelog_core_auth.https_enrollment.root_ca_pem },
+      { name = "TWO_TIER_REQUIRED", value = "true" },
+    ]
     mountPoints = [{ sourceVolume = local.tls_volume, containerPath = "/run/carelog-tls", readOnly = false }]
     secrets     = [{ name = "TLS_BUNDLE_JSON", valueFrom = var.carelog_core_auth.https_enrollment.server_bundle_secret_arn }]
     logConfiguration = {

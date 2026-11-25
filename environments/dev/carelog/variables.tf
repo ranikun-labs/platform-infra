@@ -35,7 +35,9 @@ variable "carelog_core_auth" {
       proxy_image              = string # repo@sha256:<64 hex>, digest pinned
       ecr_repository_arn       = string
       server_bundle_secret_arn = string # secret holding certificate and key as TLS_BUNDLE_JSON, no JSON-key suffix
-      kms_key_arns             = optional(set(string), [])
+      # Public root CA certificate (PEM) the chain must verify to. Not a secret; no key material allowed.
+      root_ca_pem  = string
+      kms_key_arns = optional(set(string), [])
     }))
   })
   default = {}
@@ -56,6 +58,14 @@ variable "carelog_core_auth" {
   validation {
     condition     = !var.carelog_core_auth.enabled || var.carelog_core_auth.https_enrollment != null
     error_message = "carelog_core_auth.enabled requires carelog_core_auth.https_enrollment: Core reaches Carelog only through the TLS listener on 8443."
+  }
+  validation {
+    condition = var.carelog_core_auth.https_enrollment == null || (
+      can(regex("^-----BEGIN CERTIFICATE-----", try(var.carelog_core_auth.https_enrollment.root_ca_pem, ""))) &&
+      strcontains(try(var.carelog_core_auth.https_enrollment.root_ca_pem, ""), "-----END CERTIFICATE-----") &&
+      !strcontains(try(var.carelog_core_auth.https_enrollment.root_ca_pem, ""), "PRIVATE KEY")
+    )
+    error_message = "https_enrollment.root_ca_pem must be the public root certificate PEM only (no private key)."
   }
   validation {
     condition     = var.carelog_core_auth.https_enrollment == null || var.shared.namespace_name != null

@@ -10,6 +10,8 @@ carelog_core_auth = {
     proxy_image              = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/carelog/tls-proxy@sha256:0000000000000000000000000000000000000000000000000000000000000000"
     ecr_repository_arn       = "arn:aws:ecr:ap-northeast-2:123456789012:repository/ranikun/carelog/tls-proxy"
     server_bundle_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/enrollment-tls/server-bundle-REPLACE"
+    # Public root certificate (PEM, not a secret). Placeholder below; replace with the DEV root PEM from the CA host.
+    root_ca_pem = "-----BEGIN CERTIFICATE-----\nREPLACE_WITH_PUBLIC_ROOT_PEM\n-----END CERTIFICATE-----"
     kms_key_arns             = []
   }
 }

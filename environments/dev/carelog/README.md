@@ -43,11 +43,12 @@ With the opt-in enabled, `runtime.environment` must set `SPRING_DATASOURCE_URL` 
 
 ### Core-side origin
 
-`output carelog_private_https_origin` = `https://dev-carelog.<namespace_name>:8443` (null unless `https_enrollment` is set). Core uses this one origin for both enrollment and product claims, because the TLS listener serves both paths. It has **no path**: Core adapters append `/api/v1/...` themselves.
+`output carelog_private_https_origin` = `https://<service_name>.<namespace_name>:8443` (null unless `https_enrollment` is set). `<service_name>` is `service_name_override` when set, otherwise `dev-carelog`; live DEV uses `ranikun-carelog-dev-api`. Core uses this one origin for both enrollment and product claims, because the TLS listener serves both paths. It has **no path**: Core adapters append `/api/v1/...` themselves.
 
 - `PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL=<carelog_private_https_origin>`. Auth: `Authorization: Bearer <value of CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET>`. Path `PUT /api/v1/internal/v1/identity/carelog/enrollments/{accountId}`.
 - `PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL=<carelog_private_https_origin>`. Auth: `X-Service-Id: platform-identity` and `X-Service-Secret: <value of CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET>`. Path `GET /api/v1/internal/identity/claims/{accountId}`.
-- The host is `<service_name>.<namespace_name>`. The server certificate SAN must contain it, and the proxy checks it through `TLS_EXPECTED_DNS_SAN`. `service_name_override` is the one input for a different name (not set; naming decision pending).
+- One source for the host: `<service_name>.<namespace_name>`. The same value is the Cloud Map name, the proxy `TLS_EXPECTED_DNS_SAN` (the server certificate SAN must contain it), and the Core origin output above. Set `service_name_override` once (live: `dev-live-preserve.auto.tfvars`).
+- Platform's `carelog_enrollment_origin` and `carelog_claims_origin` must equal this output. Platform cannot read this state, so the runbook gate compares the planned output of this root's ON plan with the platform signup file (names of inputs only, values never printed). A mismatch is a gate failure: the TLS handshake would fail on SAN.
 - No Core SG rule on the product port. Core reaches only 8443.
 
 ### /run/rds-ca.pem
@@ -63,18 +64,25 @@ With the opt-in enabled, `runtime.environment` must set `SPRING_DATASOURCE_URL` 
 ## Private HTTPS enrollment listener (opt-in)
 
 `carelog_core_auth.https_enrollment` (requires `carelog_core_auth.enabled` and `shared.namespace_name`) adds the TLS sidecar `carelog-tls-proxy`:
-- Listens on the task IP `8443` only (TLS). Upstream is the app on `127.0.0.1:8080`. The app keeps its `8080` mapping for Gateway traffic (Gateway SG unchanged). Core has no rule on `8080`.
+- Listens on the task IP `8443` only (TLS). Upstream is the app on `127.0.0.1:8080`. The proxy has no `8080` listener.
+- The app keeps `0.0.0.0:8080` for Gateway (Gateway SG unchanged). Internal endpoints (enrollment PUT, claims GET) accept loopback peers only, through the app's loopback flags (`carelog-be` f03f178, `docs/operations/internal-loopback-boundary.md`):
+  - `CARELOG_INTERNAL_LOOPBACK_ONLY_ENABLED=true` whenever the TLS listener exists (enrollment is loopback-only from the start).
+  - `CARELOG_INTERNAL_CLAIMS_LOOPBACK_ONLY_ENABLED` = `false` while `preserve.core_claims_security_group_id` is set (old Core rev:3 calls claims on `8080`), `true` once that input is cleared.
+- Core rule on `8080`: only the rollback-window `core_claims` rule (from `preserve.core_claims_security_group_id`). Clear it after the transition window; that is also the point where claims flip to loopback-only.
+- Netns invariant: no container in this task may relay external traffic to `127.0.0.1` (no tunnel sidecar here). Reviewed, not enforced by Terraform.
 - Core reaches it through the SG rule on `8443` from `carelog_core_auth.core_security_group_id` only.
 - Inputs are ARNs and a digest-pinned image only. `server_bundle_secret_arn` holds the certificate and key bundle, read as `TLS_BUNDLE_JSON`. The sidecar gets `TLS_EXPECTED_DNS_SAN=<service>.<namespace>`.
 
-### Proxy image contract (the image is not built in this branch)
+### Proxy image contract
 
-The image source is not in this branch. The platform-infra candidate `origin/codex/carelog-dev-tls-preserve-review` `candidates/carelog-tls/` binds `8080` on the task IP and sets `SERVER_ADDRESS=127.0.0.1`, so it cannot be used as-is. The image must:
-- Listen TLS on `TASK_IP:8443` only. No plaintext listener, and no listener on `8080` on the task IP.
-- Proxy to `127.0.0.1:8080`.
-- Serve the certificate from the bundle, and fail to start unless the certificate SAN contains `TLS_EXPECTED_DNS_SAN`.
-- Allow only these paths, with segment-bounded matching and normalization. Reject everything else with 403:
-  - `PUT /api/v1/internal/v1/identity/carelog/enrollments/{accountId}`
-  - `GET /api/v1/internal/identity/claims/{accountId}`
-- Pass the request through unchanged for the allowed paths.
-- Be digest-pinned in ECR. The health check is the command in `main.tf`.
+Image source: platform-infra `candidates/carelog-tls-8443/` at `1ad65fb3` (branch `claude/great-heisenberg-u3i75y-dev-tls-images`). Not deployed. The older `candidates/carelog-tls/` (8080 front) is not used.
+
+Inputs, as wired in `main.tf`:
+- `TLS_BUNDLE_JSON` (secret): `server_bundle_secret_arn`, leaf certificate plus issuing CA, and the leaf key. Two-tier.
+- `TLS_EXPECTED_DNS_SAN`: `local.tls_dns_name` (the single host source above).
+- `TLS_ROOT_CA_PEM` (plain env, public): `https_enrollment.root_ca_pem`. Validated as certificate PEM only; a key is rejected.
+- `TWO_TIER_REQUIRED=true`. Leaf alone is refused.
+
+Behaviour (from the image): listens on task IP `8443` TLS only, proxies to `127.0.0.1:8080`, allows exactly `PUT /api/v1/internal/v1/identity/carelog/enrollments/{uuid}` and `GET /api/v1/internal/identity/claims/{uuid}` and 403s everything else, 421 on a Host other than `TLS_EXPECTED_DNS_SAN`. Health: nginx alive, `listen <task-ip>:8443` in the rendered config, `8443` reachable, served certificate equal to `/run/carelog-tls/server.crt`, app reachable on loopback. The sidecar's `healthCheck` in `main.tf` implements this.
+
+Container: `carelog-tls-proxy`, digest-pinned in ECR.
