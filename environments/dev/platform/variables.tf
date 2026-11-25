@@ -99,10 +99,10 @@ variable "carelog_enrollment_origin" {
 variable "carelog_claims_origin" {
   type        = string
   default     = null
-  description = "Private origin of DEV Carelog for Core product claims, on the product port (plain http allowed by Core for claims). Scheme, host and port only. The TLS listener is enrollment-only, so claims stay here. Required when dev_dual_auth.enabled."
+  description = "Private HTTPS origin of DEV Carelog for Core product claims: the same TLS listener (port 8443) as enrollment, which serves enrollment PUT and claims GET only. Scheme, host and port only. Required when dev_dual_auth.enabled."
   validation {
-    condition     = var.carelog_claims_origin == null || can(regex("^https?://[^/?#@ ]+$", var.carelog_claims_origin))
-    error_message = "carelog_claims_origin must be an http or https origin without a path, query, fragment or userinfo."
+    condition     = var.carelog_claims_origin == null || can(regex("^https://[^/?#@ ]+$", var.carelog_claims_origin))
+    error_message = "carelog_claims_origin must be an https origin without a path, query, fragment or userinfo."
   }
   validation {
     condition     = !var.dev_dual_auth.enabled || var.carelog_claims_origin != null

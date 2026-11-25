@@ -127,7 +127,7 @@ run "dev_dual_auth_enabled_plans_with_secret_arns" {
   command = plan
   variables {
     carelog_enrollment_origin = "https://carelog.dev.internal"
-    carelog_claims_origin     = "http://dev-carelog.dev.internal:8080"
+    carelog_claims_origin     = "https://carelog.dev.internal"
     core_truststore = {
       trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
@@ -171,8 +171,8 @@ run "dev_dual_auth_enabled_plans_with_secret_arns" {
     error_message = "DEV dual-auth must plan both services with the same Core and Gateway topology."
   }
   assert {
-    condition     = output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"] == "https://carelog.dev.internal" && output.core_container_environment["PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL"] == "http://dev-carelog.dev.internal:8080"
-    error_message = "Core must call Carelog at the origin only; enrollment uses the HTTPS listener and claims keep the product-port origin."
+    condition     = output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"] == "https://carelog.dev.internal" && output.core_container_environment["PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL"] == "https://carelog.dev.internal"
+    error_message = "Core must call Carelog at the origin only; enrollment uses the HTTPS listener and claims use the same HTTPS listener origin."
   }
   assert {
     condition     = output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"] == "https://carelog.dev.internal" && startswith(output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"], "https://")
@@ -204,7 +204,7 @@ run "dev_dual_auth_requires_secret_arns" {
   command = plan
   variables {
     carelog_enrollment_origin = "https://carelog.dev.internal"
-    carelog_claims_origin     = "http://dev-carelog.dev.internal:8080"
+    carelog_claims_origin     = "https://carelog.dev.internal"
     core_truststore = {
       trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
@@ -222,7 +222,7 @@ run "dev_dual_auth_requires_redis_tls_setting" {
   command = plan
   variables {
     carelog_enrollment_origin = "https://carelog.dev.internal"
-    carelog_claims_origin     = "http://dev-carelog.dev.internal:8080"
+    carelog_claims_origin     = "https://carelog.dev.internal"
     core_truststore = {
       trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
@@ -242,7 +242,7 @@ run "dev_dual_auth_requires_gateway_runtime_keys" {
   command = plan
   variables {
     carelog_enrollment_origin = "https://carelog.dev.internal"
-    carelog_claims_origin     = "http://dev-carelog.dev.internal:8080"
+    carelog_claims_origin     = "https://carelog.dev.internal"
     core_truststore = {
       trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
@@ -325,7 +325,7 @@ run "dev_dual_auth_requires_core_truststore" {
       }
     })
     carelog_enrollment_origin = "https://carelog.dev.internal"
-    carelog_claims_origin     = "http://dev-carelog.dev.internal:8080"
+    carelog_claims_origin     = "https://carelog.dev.internal"
     dev_dual_auth = {
       enabled                            = true
       redis_tls_enabled                  = false
@@ -400,4 +400,12 @@ run "core_truststore_rejects_unpinned_image" {
     }
   }
   expect_failures = [var.core_truststore]
+}
+
+run "carelog_claims_rejects_plain_http" {
+  command = plan
+  variables {
+    carelog_claims_origin = "http://dev-carelog.dev.internal:8080"
+  }
+  expect_failures = [var.carelog_claims_origin]
 }
