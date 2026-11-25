@@ -272,6 +272,71 @@ class ScanTests(unittest.TestCase):
         rc, text = scan(lambda c: cand_file(c, ROOT + "/extra.tf", prose))
         self.assertEqual(rc, 0, text)
 
+    # --- round 3: comment tricks (reviewer reproduced /**/ bypasses) ---
+
+    def test_block_comment_between_label_and_brace_rejected(self):
+        hcl = 'data "terraform_remote_state" "x" /**/ {\n  backend = "http"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "block comment /* */ not allowed")
+
+    def test_block_comment_after_function_name_rejected(self):
+        hcl = 'locals {\n  x = file/**/("/proc/self/environ")\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "block comment /* */ not allowed")
+
+    def test_multiline_block_comment_in_header_rejected(self):
+        hcl = 'module "x" /*\n*/ {\n  source = "../../../modules/x"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "block comment /* */ not allowed")
+
+    def test_block_comment_marker_inside_string_rejected(self):
+        # Conservative: any /* in a candidate file is denied, even inside a string.
+        hcl = 'locals {\n  x = "/* note"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "block comment /* */ not allowed")
+
+    def test_live_code_after_line_comment_still_scanned(self):
+        hcl = 'locals {\n  x = 1 # harmless\n}\n# harmless\nlocals {\n  y = file("/x")\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "file-family function 'file' not allowed")
+
+    def test_comment_text_hiding_nothing_passes(self):
+        # Comment bodies carry no code: a file() call and a block header inside # or // are ignored.
+        hcl = ('locals {\n  x = 1 # file("/proc/self/environ")\n'
+               '  y = 2 // data "terraform_remote_state" "q" {\n}\n')
+        rc, text = scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl))
+        self.assertEqual(rc, 0, text)
+
+    def test_hash_inside_string_does_not_hide_interpolated_call(self):
+        hcl = 'locals {\n  x = "# ${file("/proc/self/environ")}"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "file-family function 'file' not allowed")
+
+    def test_double_slash_inside_string_does_not_hide_interpolated_call(self):
+        hcl = 'locals {\n  x = "https://${file("/proc/self/environ")}"\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "file-family function 'file' not allowed")
+
+    def test_escaped_quote_keeps_string_open_for_interpolated_call(self):
+        hcl = 'locals {\n  x = "a\\" ${file("/x")} # "\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "file-family function 'file' not allowed")
+
+    def test_escaped_quote_then_comment_passes(self):
+        hcl = 'locals {\n  x = "a\\"b" # "\n}\n'
+        rc, text = scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl))
+        self.assertEqual(rc, 0, text)
+
+    def test_comment_marker_inside_heredoc_interpolation_still_scanned(self):
+        hcl = 'locals {\n  x = <<EOT\n# ${file("/proc/self/environ")}\nEOT\n}\n'
+        self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl)),
+                         "file-family function 'file' not allowed")
+
+    def test_hash_text_in_heredoc_is_content_not_comment_passes(self):
+        hcl = 'locals {\n  x = <<EOT\n# hello\nEOT\n}\n'
+        rc, text = scan(lambda c: cand_file(c, ROOT + "/extra.tf", hcl))
+        self.assertEqual(rc, 0, text)
+
     def test_unquoted_provider_other_than_aws_rejected(self):
         self.assertFails(scan(lambda c: cand_file(c, ROOT + "/extra.tf", "provider http {}\n")),
                          "provider 'http' not allowed")

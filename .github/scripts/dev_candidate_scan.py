@@ -60,6 +60,91 @@ def line_of(text, pos):
     return text.count("\n", 0, pos) + 1
 
 
+HEREDOC_START_RE = re.compile(r'<<-?([A-Za-z_][A-Za-z0-9_]*)[ \t]*\r?\n')
+
+
+def strip_comments(text):
+    """Blank `#` and `//` line comments, keeping length and newlines so line numbers stay valid.
+
+    Tokenizes like HCL: quoted strings (with escapes), heredocs and ${ }/%{ } interpolation
+    (which can nest strings) are kept intact, so a comment marker inside them is not a comment
+    and code inside an interpolation is never hidden. Block comments are rejected before this runs.
+    """
+    out = list(text)
+    n = len(text)
+
+    def blank(a, b):
+        for k in range(a, b):
+            if out[k] != "\n":
+                out[k] = " "
+
+    # Frames: ["code", depth] (top level has depth None; interpolation has an int),
+    # ["str", None], ["heredoc", terminator].
+    stack = [["code", None]]
+    i = 0
+    while i < n:
+        top = stack[-1]
+        mode = top[0]
+        if mode == "code":
+            c = text[i]
+            if c == '"':
+                stack.append(["str", None])
+                i += 1
+            elif c == "#" or text.startswith("//", i):
+                j = text.find("\n", i)
+                j = n if j < 0 else j
+                blank(i, j)
+                i = j
+            elif c == "{":
+                if top[1] is not None:
+                    top[1] += 1
+                i += 1
+            elif c == "}":
+                if top[1] == 0:
+                    stack.pop()
+                elif top[1] is not None:
+                    top[1] -= 1
+                i += 1
+            elif c == "<" and text.startswith("<<", i):
+                m = HEREDOC_START_RE.match(text, i)
+                if m:
+                    stack.append(["heredoc", m.group(1)])
+                    i = m.end()
+                else:
+                    i += 1
+            else:
+                i += 1
+        elif mode == "str":
+            if text.startswith("$${", i) or text.startswith("%%{", i):
+                i += 3
+            elif text.startswith("${", i) or text.startswith("%{", i):
+                stack.append(["code", 0])
+                i += 2
+            elif text[i] == "\\":
+                i += 2
+            elif text[i] == '"':
+                stack.pop()
+                i += 1
+            else:
+                i += 1
+        else:  # heredoc
+            if i == 0 or text[i - 1] == "\n":
+                j = text.find("\n", i)
+                j = n if j < 0 else j
+                if text[i:j].strip() == top[1]:
+                    stack.pop()
+                    i = j
+                    continue
+            if text.startswith("$${", i) or text.startswith("%%{", i):
+                i += 3
+            elif text.startswith("${", i) or text.startswith("%{", i):
+                stack.append(["code", 0])
+                i += 2
+            else:
+                i += 1
+    return "".join(out)
+
+
 def iter_blocks(text, header_re):
     """Yield (line_no, match, body) per block whose header matches. Brace-counted, not a full HCL parse."""
     for m in header_re.finditer(text):
@@ -123,7 +208,12 @@ class Scan:
 
     def scan_file(self, path):
         with open(path, encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
+            raw = fh.read()
+        # Block comments are denied outright: Terraform accepts them between labels, braces and
+        # function names, where a tokenizer-level strip would have to model every such position.
+        for m in re.finditer(r"/\*", raw):
+            self.flag(path, line_of(raw, m.start()), "block comment /* */ not allowed")
+        text = strip_comments(raw)
 
         def flag_at(m, rule):
             self.flag(path, line_of(text, m.start()), rule)
@@ -197,7 +287,7 @@ def aws_provider_bodies(root_dir):
         if name.endswith(".tf") and os.path.isfile(path):
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
-            for _line, m, body in iter_blocks(text, PROVIDER_RE):
+            for _line, m, body in iter_blocks(strip_comments(text), PROVIDER_RE):
                 if m.group(1) == "aws":
                     bodies.add(body)
     return bodies
@@ -209,7 +299,7 @@ def read_backend_body(path):
         return None
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
-    found = [body for _line, _m, body in iter_blocks(text, re.compile(r'\bbackend\s+"?s3"?\s*\{'))]
+    found = [body for _line, _m, body in iter_blocks(strip_comments(text), re.compile(r'\bbackend\s+"?s3"?\s*\{'))]
     return found[0] if len(found) == 1 else None
 
 
