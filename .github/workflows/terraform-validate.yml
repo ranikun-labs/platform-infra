@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        root: [shared, platform, carelog, finance, release/platform, release/carelog, release/finance]
+        root: [shared, platform, carelog, finance, release/platform, release/carelog, release/finance, signup-off-plan]
     env:
       TF_IN_AUTOMATION: 'true'
       TF_INPUT: 'false'
