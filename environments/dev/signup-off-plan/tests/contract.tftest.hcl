@@ -14,11 +14,11 @@ variables {
 run "trust_is_exact_environment_and_workflow" {
   command = plan
   assert {
-    condition = length([for c in data.aws_iam_policy_document.trust.statement[0].condition : c if c.test == "StringEquals" && c.variable == "token.actions.githubusercontent.com:sub" && contains(c.values, "repo:ranikun-labs/platform-infra:environment:dev-signup-off-plan")]) == 1
+    condition     = length([for c in data.aws_iam_policy_document.trust.statement[0].condition : c if c.test == "StringEquals" && c.variable == "token.actions.githubusercontent.com:sub" && contains(c.values, "repo:ranikun-labs/platform-infra:environment:dev-signup-off-plan")]) == 1
     error_message = "Trust must bind the exact dev-signup-off-plan environment subject."
   }
   assert {
-    condition = length([for c in data.aws_iam_policy_document.trust.statement[0].condition : c if c.test == "StringEquals" && c.variable == "token.actions.githubusercontent.com:job_workflow_ref" && contains(c.values, "ranikun-labs/platform-infra/.github/workflows/dev-signup-off-plan.yml@refs/heads/main")]) == 1
+    condition     = length([for c in data.aws_iam_policy_document.trust.statement[0].condition : c if c.test == "StringEquals" && c.variable == "token.actions.githubusercontent.com:job_workflow_ref" && contains(c.values, "ranikun-labs/platform-infra/.github/workflows/dev-signup-off-plan.yml@refs/heads/main")]) == 1
     error_message = "Trust must pin job_workflow_ref to the main workflow ref."
   }
   assert {
