@@ -79,3 +79,141 @@ variable "workload_public_ip" {
   type    = bool
   default = false
 }
+
+# DEV-only dual-auth opt-in: one Core serving Carelog auth and Finance reference auth together. Off by default, so the
+# baseline Core/Gateway environment is unchanged. Values are secret ARNs or origins only; never secret values.
+variable "carelog_enrollment_origin" {
+  type        = string
+  default     = null
+  description = "Private HTTPS origin of DEV Carelog's enrollment listener (TLS sidecar, port 8443): scheme, host and port only, no path. Core appends /api/v1/... itself. Core rejects non-loopback http for enrollment (platform-services f9adfd3), so https is required. Required when dev_dual_auth.enabled."
+  validation {
+    condition     = var.carelog_enrollment_origin == null || can(regex("^https://[^/?#@ ]+$", var.carelog_enrollment_origin))
+    error_message = "carelog_enrollment_origin must be an https origin without a path, query, fragment or userinfo."
+  }
+  validation {
+    condition     = !var.dev_dual_auth.enabled || var.carelog_enrollment_origin != null
+    error_message = "carelog_enrollment_origin is required when dev_dual_auth.enabled is true."
+  }
+  validation {
+    condition     = try(endswith(var.carelog_enrollment_origin, ".${var.namespace_name}:8443"), var.carelog_enrollment_origin == null)
+    error_message = "carelog_enrollment_origin must be <service_name>.<namespace_name>:8443, the Carelog output carelog_private_https_origin (same namespace as namespace_name)."
+  }
+}
+
+variable "carelog_claims_origin" {
+  type        = string
+  default     = null
+  description = "Private HTTPS origin of DEV Carelog for Core product claims: the same TLS listener (port 8443) as enrollment, which serves enrollment PUT and claims GET only. Scheme, host and port only. Required when dev_dual_auth.enabled."
+  validation {
+    condition     = try(endswith(var.carelog_claims_origin, ".${var.namespace_name}:8443"), var.carelog_claims_origin == null)
+    error_message = "carelog_claims_origin must be <service_name>.<namespace_name>:8443, the Carelog output carelog_private_https_origin (same namespace as namespace_name)."
+  }
+  validation {
+    condition     = var.carelog_claims_origin == null || can(regex("^https://[^/?#@ ]+$", var.carelog_claims_origin))
+    error_message = "carelog_claims_origin must be an https origin without a path, query, fragment or userinfo."
+  }
+  validation {
+    condition     = !var.dev_dual_auth.enabled || var.carelog_claims_origin != null
+    error_message = "carelog_claims_origin is required when dev_dual_auth.enabled is true."
+  }
+}
+
+# Core trust for the Carelog enrollment CA. The init image is built FROM the exact Core image digest with the PUBLIC CA
+# bundle baked in. It writes a derived truststore (Core default cacerts plus the CA) to the task volume, which Core reads
+# read-only through JAVA_TOOL_OPTIONS. Public material only; never a secret.
+variable "core_truststore" {
+  type = object({
+    trust_init_image   = string # repo@sha256:<64 hex>
+    ecr_repository_arn = string
+  })
+  default     = null
+  description = "Core trust-init image (digest pinned, built FROM the Core image digest) and its ECR repository. Required when dev_dual_auth.enabled."
+  validation {
+    condition = var.core_truststore == null || (
+      can(regex("^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$", var.core_truststore.trust_init_image)) &&
+      can(regex("^arn:aws:ecr:[a-z0-9-]+:[0-9]{12}:repository/[a-z0-9._/-]+$", var.core_truststore.ecr_repository_arn))
+    )
+    error_message = "core_truststore needs a digest-pinned private ECR image and an ECR repository ARN."
+  }
+  validation {
+    condition     = !var.dev_dual_auth.enabled || var.core_truststore != null
+    error_message = "core_truststore is required when dev_dual_auth.enabled is true; Core must trust the Carelog enrollment CA."
+  }
+}
+
+variable "dev_dual_auth" {
+  type = object({
+    enabled = bool
+    # Same secret for Core's signing key and Gateway's verification key.
+    jwt_signing_key_secret_arn = optional(string)
+    # Gateway caller secret. The Finance receiver must reference this same secret (finance root dev_trusted_context).
+    finance_trusted_context_secret_arn = optional(string)
+    # Must equal Carelog's enrollment credential (Carelog side: CARELOG_IDENTITY_ENROLLMENT_SERVICE_SECRET).
+    carelog_enrollment_secret_arn = optional(string)
+    # Must equal Carelog's internal identity claims secret (Carelog side: CARELOG_INTERNAL_IDENTITY_CLAIMS_SERVICE_SECRET).
+    product_claims_secret_arn = optional(string)
+    finance_service_name      = optional(string, "dev-finance")
+    finance_container_port    = optional(number, 8080)
+    # Required when enabled (no default). Must match the Valkey endpoint actually in use; true only once managed Valkey TLS is verified end to end (see README).
+    redis_tls_enabled = optional(bool)
+  })
+  default     = { enabled = false }
+  description = "DEV-only dual-auth opt-in (Core Carelog + Finance reference, Gateway Finance route). Guards in platform-services reject prod markers."
+  validation {
+    condition = !var.dev_dual_auth.enabled || alltrue([
+      for arn in [
+        var.dev_dual_auth.jwt_signing_key_secret_arn,
+        var.dev_dual_auth.finance_trusted_context_secret_arn,
+        var.dev_dual_auth.carelog_enrollment_secret_arn,
+        var.dev_dual_auth.product_claims_secret_arn,
+      ] : arn != null && can(regex("^arn:aws:secretsmanager:[^:]+:[0-9]{12}:secret:[^:]+$", arn))
+    ])
+    error_message = "dev_dual_auth requires Secrets Manager secret ARNs (without JSON-key suffixes) for all four secret fields."
+  }
+  validation {
+    condition     = !var.dev_dual_auth.enabled || var.dev_dual_auth.redis_tls_enabled != null
+    error_message = "dev_dual_auth.redis_tls_enabled is required when dev_dual_auth.enabled is true; set it to match the Valkey endpoint in use."
+  }
+  validation {
+    condition     = can(regex("^[a-z0-9-]+$", var.dev_dual_auth.finance_service_name)) && var.dev_dual_auth.finance_container_port > 0 && var.dev_dual_auth.finance_container_port < 65536
+    error_message = "finance_service_name must be a Cloud Map DNS label and finance_container_port a valid TCP port."
+  }
+}
+
+# Live DEV preservation for the Gateway and Core services. Defaults equal the module's previous behavior, so an unset
+# input plans as before. Values come from the deployed services (see dev-live-preserve.auto.tfvars.example).
+variable "gateway_preserve" {
+  description = "Preserved settings of the deployed Gateway service. Public IP without subnet change, IAM boundaries and trust conditions, Cloud Map health check."
+  type = object({
+    assign_public_ip                      = optional(bool, false)
+    execution_permissions_boundary_arn    = optional(string)
+    task_permissions_boundary_arn         = optional(string)
+    assume_role_source_conditions         = optional(bool, false)
+    service_discovery_custom_health_check = optional(bool, true)
+  })
+  default = {}
+  validation {
+    condition = alltrue([for a in [
+      var.gateway_preserve.execution_permissions_boundary_arn, var.gateway_preserve.task_permissions_boundary_arn,
+    ] : a == null || can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", a))])
+    error_message = "Permissions boundaries must be IAM policy ARNs."
+  }
+}
+
+variable "core_preserve" {
+  description = "Preserved settings of the deployed Core service. Same fields as gateway_preserve."
+  type = object({
+    assign_public_ip                      = optional(bool, false)
+    execution_permissions_boundary_arn    = optional(string)
+    task_permissions_boundary_arn         = optional(string)
+    assume_role_source_conditions         = optional(bool, false)
+    service_discovery_custom_health_check = optional(bool, true)
+  })
+  default = {}
+  validation {
+    condition = alltrue([for a in [
+      var.core_preserve.execution_permissions_boundary_arn, var.core_preserve.task_permissions_boundary_arn,
+    ] : a == null || can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", a))])
+    error_message = "Permissions boundaries must be IAM policy ARNs."
+  }
+}

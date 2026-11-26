@@ -1,0 +1,22 @@
+# Overlay: Carelog enrollment and Core dual-auth ON (signup path). Apply only after the Carelog TLS listener is live.
+#   terraform plan -var-file=dev-live-preserve.auto.tfvars -var-file=dev-signup-on.auto.tfvars.example
+# Origins are scheme, host and port only (https required). Every value is a placeholder; secrets are ARNs only.
+# The base file must also provide the dual-auth runtime keys (see services.tf validations).
+
+# Must equal carelog output carelog_private_https_origin (<service_name>.<namespace_name>:8443). Same namespace as namespace_name.
+carelog_enrollment_origin = "https://ranikun-carelog-dev-api.REPLACE.internal:8443"
+carelog_claims_origin     = "https://ranikun-carelog-dev-api.REPLACE.internal:8443"
+
+core_truststore = {
+  trust_init_image   = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core-trust-init@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:123456789012:repository/ranikun/platform/core-trust-init"
+}
+
+dev_dual_auth = {
+  enabled                            = true
+  jwt_signing_key_secret_arn         = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/platform/jwt-signing-REPLACE"
+  finance_trusted_context_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/platform/finance-context-REPLACE"
+  carelog_enrollment_secret_arn      = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/enrollment-REPLACE"
+  product_claims_secret_arn          = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/carelog/claims-REPLACE"
+  redis_tls_enabled                  = true
+}
