@@ -4,6 +4,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WORKFLOWS = os.path.join(HERE, "..", "..", "workflows")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 PLAN_JOBS = ("plan-carelog-platform", "plan-finance")
+PLAN_ENVIRONMENT = "dev-signup-off-plan"
+PLAN_ROLE_ARN = "arn:aws:iam::124495093425:role/ranikun-dev-signup-off-plan"
+PLAN_ROLE_SESSION = "arn:aws:sts::124495093425:assumed-role/ranikun-dev-signup-off-plan/*"
+CANDIDATE_B = "865138736fa38a18171cb566720a12e21ec587c6"
 CANDIDATE_TERRAFORM_STEPS = ("Terraform init", "Plan")
 
 
@@ -41,7 +45,7 @@ class PlanWorkflowTests(unittest.TestCase):
         for name, j in jobs.items():
             self.assertIn("refs/heads/main", j["if"], name)
         for name in PLAN_JOBS:
-            self.assertEqual(jobs[name]["environment"], "dev-plan")
+            self.assertEqual(jobs[name]["environment"], PLAN_ENVIRONMENT)
             self.assertEqual(jobs[name]["permissions"], {"contents": "read", "id-token": "write"})
             self.assertEqual(jobs[name]["concurrency"]["group"], "dev-signup-off-plan")
         self.assertEqual(jobs["plan-carelog-platform"]["needs"], "validate")
@@ -134,6 +138,24 @@ class PlanWorkflowTests(unittest.TestCase):
                 if str(s.get("uses", "")).startswith("hashicorp/setup-terraform@"):
                     self.assertEqual(s["with"]["terraform_version"], "1.10.5")
 
+    def test_plan_role_and_identity_check_are_dedicated(self):
+        # The OFF plan must assume only the dedicated role, never the shared plan role.
+        for name in PLAN_JOBS:
+            job = self.doc["jobs"][name]
+            oidc = next(s for s in job["steps"]
+                        if str(s.get("uses", "")).startswith("aws-actions/configure-aws-credentials@"))
+            self.assertEqual(oidc["with"]["role-to-assume"], PLAN_ROLE_ARN, name)
+            verify = next(s["run"] for s in job["steps"] if s.get("name") == "Verify AWS identity")
+            self.assertIn(PLAN_ROLE_SESSION, verify, name)
+        self.assertNotIn("ranikun-dev-shared-plan", open(os.path.join(WORKFLOWS, "dev-signup-off-plan.yml"),
+                                                       encoding="utf-8").read())
+
+    def test_candidate_b_documented_but_not_allowlisted(self):
+        raw = open(os.path.join(WORKFLOWS, "dev-signup-off-plan.yml"), encoding="utf-8").read()
+        self.assertEqual(raw.count(CANDIDATE_B), 1)
+        comment = [line for line in raw.splitlines() if CANDIDATE_B in line]
+        self.assertTrue(all(line.lstrip().startswith("#") for line in comment))
+
     def test_allowlist_present_and_fail_closed(self):
         validate = self.doc["jobs"]["validate"]
         script = next(s["run"] for s in validate["steps"] if "allowed=(" in s.get("run", ""))
@@ -151,6 +173,8 @@ BUCKET_HOST = "tfstate-bucket.s3.ap-northeast-2.amazonaws.com:443"
 def allowlist_shas(doc):
     script = next(s["run"] for s in doc["jobs"]["validate"]["steps"] if "allowed=(" in s.get("run", ""))
     body = re.search(r"allowed=\((.*?)\)", script, re.S).group(1)
+    # Bash comments inside the array are not entries; a commented plan must not count as pinned.
+    body = "\n".join(line.split("#", 1)[0] for line in body.splitlines())
     return re.findall(r"\b[0-9a-f]{40}\b", body)
 
 

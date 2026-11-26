@@ -14,7 +14,7 @@ name: DEV signup-off plan (read-only)
 # - Plans only. Never applies. No artifacts are uploaded. Raw logs and plans are deleted.
 # - Published output is the sanitized gate summary: masked addresses, actions, changed
 #   attribute NAMES, and for failures only the denied action, service prefix and a hint.
-# - Requires the dev-plan environment approval and DEV_SIGNUP_OFF_PRESERVE_JSON.
+# - Requires the dev-signup-off-plan environment approval and DEV_SIGNUP_OFF_PRESERVE_JSON.
 # - Concurrency: group `dev-signup-off-plan` with cancel-in-progress: false. One run executes and
 #   at most one run waits. A newer run queued while another is waiting REPLACES (cancels) the
 #   waiting run, so a queued run can disappear without a result. Check the run that actually
@@ -28,7 +28,7 @@ name: DEV signup-off plan (read-only)
 #      Never the generic regional S3 host. Not yet added: harden-runner needs a full commit SHA
 #      that could not be verified here, and its allowlist needs a live run to validate.
 #      Enforced by test_dev_plan_workflow.py (EgressPreconditionTests).
-#   2. Plan role (ranikun-dev-shared-plan) IAM Resource scoped to the owning account
+#   2. Plan role (ranikun-dev-signup-off-plan, environments/dev/signup-off-plan) IAM Resource scoped to the owning account
 #      (124495093425) with an aws:ResourceAccount condition. This condition stays mandatory,
 #      because regional API endpoints accept foreign ARNs. S3 endpoint policies do NOT apply
 #      on GitHub-hosted runners (public internet), so they are not a substitute for item 1.
@@ -67,6 +67,8 @@ jobs:
           # Reviewed SHAs only; review of the SHA is a control, not the boundary.
           # Empty means fail closed until an owner adds the reviewed full SHA here.
           allowed=(
+          # Planned entry, not pinned yet (added only in the separate approved commit):
+          #   865138736fa38a18171cb566720a12e21ec587c6   candidate B, tree 128364d0
           )
           (( ${#allowed[@]} > 0 )) || { echo 'Candidate allowlist is empty; add the reviewed full SHA to this workflow first' >&2; exit 1; }
           for sha in "${allowed[@]}"; do
@@ -79,7 +81,7 @@ jobs:
     needs: validate
     if: github.repository == 'ranikun-labs/platform-infra' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: dev-plan
+    environment: dev-signup-off-plan
     permissions:
       contents: read
       id-token: write
@@ -135,7 +137,7 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: arn:aws:iam::124495093425:role/ranikun-dev-shared-plan
+          role-to-assume: arn:aws:iam::124495093425:role/ranikun-dev-signup-off-plan
           aws-region: ap-northeast-2
           audience: sts.amazonaws.com
           allowed-account-ids: '124495093425'
@@ -146,7 +148,7 @@ jobs:
           set -euo pipefail
           identity=$(aws sts get-caller-identity --query '[Account,Arn]' --output text)
           read -r account arn <<< "$identity"
-          [[ "$account" == 124495093425 && "$arn" == arn:aws:sts::124495093425:assumed-role/ranikun-dev-shared-plan/* ]]
+          [[ "$account" == 124495093425 && "$arn" == arn:aws:sts::124495093425:assumed-role/ranikun-dev-signup-off-plan/* ]]
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
@@ -275,7 +277,7 @@ jobs:
       always() && needs.validate.result == 'success' &&
       github.repository == 'ranikun-labs/platform-infra' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: dev-plan
+    environment: dev-signup-off-plan
     permissions:
       contents: read
       id-token: write
@@ -324,7 +326,7 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: arn:aws:iam::124495093425:role/ranikun-dev-shared-plan
+          role-to-assume: arn:aws:iam::124495093425:role/ranikun-dev-signup-off-plan
           aws-region: ap-northeast-2
           audience: sts.amazonaws.com
           allowed-account-ids: '124495093425'
@@ -335,7 +337,7 @@ jobs:
           set -euo pipefail
           identity=$(aws sts get-caller-identity --query '[Account,Arn]' --output text)
           read -r account arn <<< "$identity"
-          [[ "$account" == 124495093425 && "$arn" == arn:aws:sts::124495093425:assumed-role/ranikun-dev-shared-plan/* ]]
+          [[ "$account" == 124495093425 && "$arn" == arn:aws:sts::124495093425:assumed-role/ranikun-dev-signup-off-plan/* ]]
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
