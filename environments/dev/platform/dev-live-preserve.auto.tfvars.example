@@ -1,0 +1,80 @@
+# Live DEV preserve values for environments/dev/platform. Copy to dev-live-preserve.auto.tfvars (git-ignored, never commit).
+# Placeholders only (ARNs, IDs, digests). Fill from the live services on the operator machine.
+# Opt-ins stay off (dev_dual_auth, core_truststore, carelog origins). With these values the plan must be a no-op vs live.
+
+aws_region     = "ap-northeast-2"
+aws_account_id = "123456789012"
+name_prefix    = "ranikun-dev"
+vpc_id         = "vpc-REPLACE"
+cluster_arn    = "arn:aws:ecs:ap-northeast-2:123456789012:cluster/dev-shared"
+namespace_id   = "ns-REPLACE"
+namespace_name = "REPLACE.internal"
+
+private_subnet_ids = ["subnet-REPLACE-a", "subnet-REPLACE-c"]
+public_subnet_ids  = ["subnet-REPLACE-b", "subnet-REPLACE-d"]
+
+# Live DEV has no public ALB. The Tunnel connector is the only public path, so enable_alb = false needs gateway_cloudflared.
+enable_alb             = false
+certificate_arn        = null
+alb_ingress_cidrs      = []
+gateway_readiness_path = null
+
+# Tasks run in the private subnets with a public IP (no NAT or VPC endpoints). Keep workload_public_ip false.
+workload_public_ip = false
+
+gateway_cloudflared = {
+  # Sidecar container of the Gateway task. Image pinned by digest; the token is a Secrets Manager ARN, never a value.
+  image              = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:123456789012:repository/cloudflared"
+  token_secret_arn   = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:dev/platform/tunnel-REPLACE"
+}
+
+# Tunnel sidecar: default is gateway_cloudflared (module-built cloudflared container). If the live sidecar is not that
+# shape, set gateway_cloudflared = null and copy the live container as a raw definition into gateway_additional_containers
+# (digest-pinned image; ECR repo in gateway_additional_ecr_repository_arns). Never both. The runbook prints each container's image repo.
+gateway_preserve = {
+  assign_public_ip                      = true
+  execution_permissions_boundary_arn    = "arn:aws:iam::123456789012:policy/REPLACE-dev-boundary-execution"
+  task_permissions_boundary_arn         = "arn:aws:iam::123456789012:policy/REPLACE-dev-boundary-task"
+  assume_role_source_conditions         = true
+  service_discovery_custom_health_check = true
+}
+
+core_preserve = {
+  assign_public_ip                      = true
+  execution_permissions_boundary_arn    = "arn:aws:iam::123456789012:policy/REPLACE-dev-boundary-execution"
+  task_permissions_boundary_arn         = "arn:aws:iam::123456789012:policy/REPLACE-dev-boundary-task"
+  assume_role_source_conditions         = true
+  service_discovery_custom_health_check = true
+}
+
+gateway_runtime = {
+  image                  = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  ecr_repository_arn     = "arn:aws:ecr:ap-northeast-2:123456789012:repository/ranikun/platform/gateway"
+  cpu                    = 512
+  memory                 = 1024
+  environment            = {} # Names and non-secret values from the live task definition. REPLACE before planning.
+  secrets                = {} # Secrets Manager ARNs only.
+  execution_secret_arns  = []
+  execution_kms_key_arns = []
+  health_check           = { command = ["CMD-SHELL", "REPLACE_WITH_LIVE_HEALTHCHECK"], interval = 30, timeout = 10, retries = 3, start_period = 300 }
+  log_retention_days     = 30
+}
+
+core_runtime = {
+  image                  = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/ranikun/platform/core@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  ecr_repository_arn     = "arn:aws:ecr:ap-northeast-2:123456789012:repository/ranikun/platform/core"
+  cpu                    = 512
+  memory                 = 1024
+  environment            = {}
+  secrets                = {}
+  execution_secret_arns  = []
+  execution_kms_key_arns = []
+  health_check           = { command = ["CMD-SHELL", "REPLACE_WITH_LIVE_HEALTHCHECK"], interval = 30, timeout = 10, retries = 3, start_period = 120 }
+  log_retention_days     = 30
+}
+
+tags = {
+  Environment = "dev"
+  Owner       = "REPLACE"
+}

@@ -17,6 +17,25 @@ variable "shared" {
   })
 }
 variable "gateway_security_group_id" { type = string }
+
+# DEV-only trusted-context receiver (dev profile) for the Gateway-routed Finance task. Off by default.
+# The secret must be the same secret as platform's dev_dual_auth.finance_trusted_context_secret_arn.
+variable "dev_trusted_context" {
+  type = object({
+    enabled    = bool
+    secret_arn = optional(string)
+  })
+  default     = { enabled = false }
+  description = "Enables the trusted-context receiver under the dev profile. Never combine with a prod profile or marker."
+  validation {
+    condition = !var.dev_trusted_context.enabled || (
+      var.dev_trusted_context.secret_arn != null &&
+      can(regex("^arn:aws:secretsmanager:[^:]+:[0-9]{12}:secret:[^:]+$", var.dev_trusted_context.secret_arn))
+    )
+    error_message = "dev_trusted_context requires a Secrets Manager secret ARN (without a JSON-key suffix) when enabled."
+  }
+}
+
 variable "runtime" {
   type = object({
     image                     = string
@@ -56,5 +75,25 @@ variable "workload_public_subnet_ids" {
   validation {
     condition     = !var.workload_public_ip || length(var.workload_public_subnet_ids) > 0
     error_message = "Public IP tasks require explicit public subnets."
+  }
+}
+
+# Live DEV preservation for the Finance service (same meaning as carelog's preserve). Defaults equal the module's
+# previous behavior; set only from live facts in dev-live-preserve.auto.tfvars.
+variable "preserve" {
+  description = "Live-service preservation inputs. Defaults reproduce the previous behavior."
+  type = object({
+    assign_public_ip                      = optional(bool, false)
+    execution_permissions_boundary_arn    = optional(string)
+    task_permissions_boundary_arn         = optional(string)
+    assume_role_source_conditions         = optional(bool, false)
+    service_discovery_custom_health_check = optional(bool, true)
+  })
+  default = {}
+  validation {
+    condition = alltrue([for a in [
+      var.preserve.execution_permissions_boundary_arn, var.preserve.task_permissions_boundary_arn,
+    ] : a == null || can(regex("^arn:aws:iam::[0-9]{12}:policy/.+$", a))])
+    error_message = "Permissions boundaries must be IAM policy ARNs."
   }
 }

@@ -103,3 +103,432 @@ run "no_alb_requires_connector" {
   }
   expect_failures = [var.gateway_cloudflared]
 }
+
+# Opt-ins off: the composed Gateway and Core container inputs must be exactly the origin/main shape.
+run "default_containers_match_origin" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      jsonencode(output.gateway_container_environment) == jsonencode({
+        PLATFORM_GATEWAY_PORT            = "8080"
+        PLATFORM_GATEWAY_MANAGEMENT_PORT = "9091"
+        PLATFORM_GATEWAY_AUTH_URI        = "http://test-dev-core.dev.internal:8081"
+      }),
+      jsonencode(output.gateway_container_secrets) == jsonencode({}),
+      jsonencode(output.core_container_environment) == jsonencode({ PLATFORM_CORE_PORT = "8081" }),
+      jsonencode(output.core_container_secrets) == jsonencode({}),
+    ])
+    error_message = "With dev_dual_auth disabled the Gateway and Core container inputs must match origin/main."
+  }
+}
+
+run "dev_dual_auth_enabled_plans_with_secret_arns" {
+  command = plan
+  variables {
+    carelog_enrollment_origin = "https://carelog.dev.internal"
+    carelog_claims_origin     = "https://carelog.dev.internal"
+    core_truststore = {
+      trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
+    }
+    gateway_runtime = merge(var.gateway_runtime, {
+      environment = {
+        PLATFORM_GATEWAY_CARELOG_RAG_URI  = "http://carelog-rag.dev.internal:8080"
+        PLATFORM_GATEWAY_CARELOG_BE_URI   = "http://dev-carelog.dev.internal:8080"
+        PLATFORM_GATEWAY_REDIS_HOST       = "platform-valkey.dev.internal"
+        PLATFORM_GATEWAY_REDIS_PORT       = "6379"
+        PLATFORM_GATEWAY_REDIS_KEY_PREFIX = "platform:gateway:"
+      }
+      secrets = {
+        PLATFORM_GATEWAY_INTERNAL_SECRET         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/gateway-internal-AbCdEf"
+        PLATFORM_GATEWAY_JWT_VERIFICATION_SECRET = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
+      }
+    })
+    core_runtime = merge(var.core_runtime, {
+      environment = {
+        PLATFORM_IDENTITY_REDIS_HOST     = "platform-valkey.dev.internal"
+        PLATFORM_IDENTITY_REDIS_PORT     = "6379"
+        PLATFORM_IDENTITY_DATASOURCE_URL = "jdbc:postgresql://platform-db.dev.internal:5432/platform"
+      }
+      secrets = {
+        PLATFORM_IDENTITY_DATASOURCE_USERNAME = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-db-user-AbCdEf"
+        PLATFORM_IDENTITY_DATASOURCE_PASSWORD = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-db-password-AbCdEf"
+        PLATFORM_IDENTITY_JWT_SECRET_KEY      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-jwt-AbCdEf"
+      }
+    })
+    dev_dual_auth = {
+      enabled                            = true
+      redis_tls_enabled                  = false
+      jwt_signing_key_secret_arn         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
+      finance_trusted_context_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-trusted-context-AbCdEf"
+      carelog_enrollment_secret_arn      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-enrollment-AbCdEf"
+      product_claims_secret_arn          = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-claims-AbCdEf"
+    }
+  }
+  assert {
+    condition     = module.core.service_name != null && module.gateway.service_name != null
+    error_message = "DEV dual-auth must plan both services with the same Core and Gateway topology."
+  }
+  assert {
+    condition     = output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"] == "https://carelog.dev.internal" && output.core_container_environment["PLATFORM_IDENTITY_PRODUCT_CLAIMS_BASE_URL"] == "https://carelog.dev.internal"
+    error_message = "Core must call Carelog at the origin only; enrollment uses the HTTPS listener and claims use the same HTTPS listener origin."
+  }
+  assert {
+    condition     = output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"] == "https://carelog.dev.internal" && startswith(output.core_container_environment["PLATFORM_IDENTITY_CARELOG_ENROLLMENT_BASE_URL"], "https://")
+    error_message = "Core rejects non-loopback http for enrollment, so the enrollment origin must be https."
+  }
+  assert {
+    condition     = output.core_container_environment["JAVA_TOOL_OPTIONS"] == "-Djavax.net.ssl.trustStore=/run/carelog-trust/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+    error_message = "Core must read the derived truststore that trusts the Carelog enrollment CA."
+  }
+  assert {
+    condition     = length([for c in jsondecode(module.core.baseline_container_definitions) : c if c.name == "core-trust-init" && c.essential == false]) == 1 && jsondecode(module.core.baseline_container_definitions)[0].dependsOn == [{ containerName = "core-trust-init", condition = "SUCCESS" }]
+    error_message = "Core app must start only after the trust-init container succeeds."
+  }
+  assert {
+    condition     = jsondecode(module.core.baseline_container_definitions)[0].mountPoints == [{ sourceVolume = "core-truststore", containerPath = "/run/carelog-trust", readOnly = true }]
+    error_message = "Core app must mount the truststore read-only."
+  }
+  assert {
+    condition     = output.gateway_container_environment["PLATFORM_GATEWAY_CARELOG_BE_URI"] == "http://dev-carelog.dev.internal:8080"
+    error_message = "dual-auth must not override the Gateway Carelog backend; the gateway_runtime value stays authoritative."
+  }
+  assert {
+    condition     = output.core_container_environment["SPRING_PROFILES_ACTIVE"] == "finance-reference,dev" && output.core_container_environment["PLATFORM_IDENTITY_REDIS_TLS_ENABLED"] == "false"
+    error_message = "Core dual-auth profile and Redis TLS flag must come from the opt-in."
+  }
+}
+
+run "dev_dual_auth_requires_secret_arns" {
+  command = plan
+  variables {
+    carelog_enrollment_origin = "https://carelog.dev.internal"
+    carelog_claims_origin     = "https://carelog.dev.internal"
+    core_truststore = {
+      trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
+    }
+    dev_dual_auth = {
+      enabled                    = true
+      redis_tls_enabled          = true
+      jwt_signing_key_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf:key::"
+    }
+  }
+  expect_failures = [var.dev_dual_auth]
+}
+
+run "dev_dual_auth_requires_redis_tls_setting" {
+  command = plan
+  variables {
+    carelog_enrollment_origin = "https://carelog.dev.internal"
+    carelog_claims_origin     = "https://carelog.dev.internal"
+    core_truststore = {
+      trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
+    }
+    dev_dual_auth = {
+      enabled                            = true
+      jwt_signing_key_secret_arn         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
+      finance_trusted_context_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-trusted-context-AbCdEf"
+      carelog_enrollment_secret_arn      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-enrollment-AbCdEf"
+      product_claims_secret_arn          = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-claims-AbCdEf"
+    }
+  }
+  expect_failures = [var.dev_dual_auth]
+}
+
+run "dev_dual_auth_requires_gateway_runtime_keys" {
+  command = plan
+  variables {
+    carelog_enrollment_origin = "https://carelog.dev.internal"
+    carelog_claims_origin     = "https://carelog.dev.internal"
+    core_truststore = {
+      trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
+    }
+    core_runtime = merge(var.core_runtime, {
+      environment = {
+        PLATFORM_IDENTITY_REDIS_HOST     = "platform-valkey.dev.internal"
+        PLATFORM_IDENTITY_REDIS_PORT     = "6379"
+        PLATFORM_IDENTITY_DATASOURCE_URL = "jdbc:postgresql://platform-db.dev.internal:5432/platform"
+      }
+      secrets = {
+        PLATFORM_IDENTITY_DATASOURCE_USERNAME = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-db-user-AbCdEf"
+        PLATFORM_IDENTITY_DATASOURCE_PASSWORD = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-db-password-AbCdEf"
+        PLATFORM_IDENTITY_JWT_SECRET_KEY      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-jwt-AbCdEf"
+      }
+    })
+    dev_dual_auth = {
+      enabled                            = true
+      redis_tls_enabled                  = false
+      jwt_signing_key_secret_arn         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
+      finance_trusted_context_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-trusted-context-AbCdEf"
+      carelog_enrollment_secret_arn      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-enrollment-AbCdEf"
+      product_claims_secret_arn          = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-claims-AbCdEf"
+    }
+  }
+  # Empty gateway_runtime from the file-level fixture.
+  expect_failures = [var.gateway_runtime]
+}
+
+run "carelog_origin_rejects_path" {
+  command = plan
+  variables {
+    carelog_enrollment_origin = "https://carelog.dev.internal/api"
+  }
+  expect_failures = [var.carelog_enrollment_origin]
+}
+
+run "carelog_origin_rejects_userinfo_and_query" {
+  command = plan
+  variables {
+    carelog_enrollment_origin = "https://user@carelog.dev.internal?x=1"
+  }
+  expect_failures = [var.carelog_enrollment_origin]
+}
+
+run "carelog_origin_rejects_non_http_scheme" {
+  command = plan
+  variables {
+    carelog_enrollment_origin = "ftp://carelog.dev.internal"
+  }
+  expect_failures = [var.carelog_enrollment_origin]
+}
+
+run "dev_dual_auth_requires_core_truststore" {
+  command = plan
+  variables {
+    gateway_runtime = merge(var.gateway_runtime, {
+      environment = {
+        PLATFORM_GATEWAY_CARELOG_RAG_URI  = "http://carelog-rag.dev.internal:8080"
+        PLATFORM_GATEWAY_CARELOG_BE_URI   = "http://dev-carelog.dev.internal:8080"
+        PLATFORM_GATEWAY_REDIS_HOST       = "platform-valkey.dev.internal"
+        PLATFORM_GATEWAY_REDIS_PORT       = "6379"
+        PLATFORM_GATEWAY_REDIS_KEY_PREFIX = "platform:gateway:"
+      }
+      secrets = {
+        PLATFORM_GATEWAY_INTERNAL_SECRET         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/gateway-internal-AbCdEf"
+        PLATFORM_GATEWAY_JWT_VERIFICATION_SECRET = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
+      }
+    })
+    core_runtime = merge(var.core_runtime, {
+      environment = {
+        PLATFORM_IDENTITY_REDIS_HOST     = "platform-valkey.dev.internal"
+        PLATFORM_IDENTITY_REDIS_PORT     = "6379"
+        PLATFORM_IDENTITY_DATASOURCE_URL = "jdbc:postgresql://platform-db.dev.internal:5432/platform"
+      }
+      secrets = {
+        PLATFORM_IDENTITY_DATASOURCE_USERNAME = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-db-user-AbCdEf"
+        PLATFORM_IDENTITY_DATASOURCE_PASSWORD = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-db-password-AbCdEf"
+        PLATFORM_IDENTITY_JWT_SECRET_KEY      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-jwt-AbCdEf"
+      }
+    })
+    carelog_enrollment_origin = "https://carelog.dev.internal"
+    carelog_claims_origin     = "https://carelog.dev.internal"
+    dev_dual_auth = {
+      enabled                            = true
+      redis_tls_enabled                  = false
+      jwt_signing_key_secret_arn         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
+      finance_trusted_context_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-trusted-context-AbCdEf"
+      carelog_enrollment_secret_arn      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-enrollment-AbCdEf"
+      product_claims_secret_arn          = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-claims-AbCdEf"
+    }
+  }
+  expect_failures = [var.core_truststore]
+}
+
+run "dev_dual_auth_requires_claims_origin" {
+  command = plan
+  variables {
+    core_truststore = {
+      trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
+    }
+    gateway_runtime = merge(var.gateway_runtime, {
+      environment = {
+        PLATFORM_GATEWAY_CARELOG_RAG_URI  = "http://carelog-rag.dev.internal:8080"
+        PLATFORM_GATEWAY_CARELOG_BE_URI   = "http://dev-carelog.dev.internal:8080"
+        PLATFORM_GATEWAY_REDIS_HOST       = "platform-valkey.dev.internal"
+        PLATFORM_GATEWAY_REDIS_PORT       = "6379"
+        PLATFORM_GATEWAY_REDIS_KEY_PREFIX = "platform:gateway:"
+      }
+      secrets = {
+        PLATFORM_GATEWAY_INTERNAL_SECRET         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/gateway-internal-AbCdEf"
+        PLATFORM_GATEWAY_JWT_VERIFICATION_SECRET = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
+      }
+    })
+    core_runtime = merge(var.core_runtime, {
+      environment = {
+        PLATFORM_IDENTITY_REDIS_HOST     = "platform-valkey.dev.internal"
+        PLATFORM_IDENTITY_REDIS_PORT     = "6379"
+        PLATFORM_IDENTITY_DATASOURCE_URL = "jdbc:postgresql://platform-db.dev.internal:5432/platform"
+      }
+      secrets = {
+        PLATFORM_IDENTITY_DATASOURCE_USERNAME = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-db-user-AbCdEf"
+        PLATFORM_IDENTITY_DATASOURCE_PASSWORD = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-db-password-AbCdEf"
+        PLATFORM_IDENTITY_JWT_SECRET_KEY      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/platform-jwt-AbCdEf"
+      }
+    })
+    carelog_enrollment_origin = "https://carelog.dev.internal"
+    dev_dual_auth = {
+      enabled                            = true
+      redis_tls_enabled                  = false
+      jwt_signing_key_secret_arn         = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-reference-signing-AbCdEf"
+      finance_trusted_context_secret_arn = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/finance-trusted-context-AbCdEf"
+      carelog_enrollment_secret_arn      = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-enrollment-AbCdEf"
+      product_claims_secret_arn          = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:dev/carelog-claims-AbCdEf"
+    }
+  }
+  expect_failures = [var.carelog_claims_origin]
+}
+
+run "carelog_enrollment_rejects_plain_http" {
+  command = plan
+  variables {
+    carelog_enrollment_origin = "http://dev-carelog.dev.internal:8080"
+  }
+  expect_failures = [var.carelog_enrollment_origin]
+}
+
+run "core_truststore_rejects_unpinned_image" {
+  command = plan
+  variables {
+    core_truststore = {
+      trust_init_image   = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/core-trust-init:latest"
+      ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/core-trust-init"
+    }
+  }
+  expect_failures = [var.core_truststore]
+}
+
+run "carelog_claims_rejects_plain_http" {
+  command = plan
+  variables {
+    carelog_claims_origin = "http://dev-carelog.dev.internal:8080"
+  }
+  expect_failures = [var.carelog_claims_origin]
+}
+
+# Live preservation without opt-ins: unset inputs keep the ALB and the previous task shape.
+run "preserve_defaults_keep_alb_and_previous_shape" {
+  command = plan
+
+  assert {
+    condition     = length(aws_lb.gateway) == 1 && var.gateway_preserve.assign_public_ip == false && var.core_preserve.assign_public_ip == false
+    error_message = "Unset preservation inputs must keep the ALB and private, non-public tasks."
+  }
+  assert {
+    condition     = var.gateway_preserve.service_discovery_custom_health_check == true && var.core_preserve.service_discovery_custom_health_check == true
+    error_message = "The Cloud Map custom health check stays declared by default, as on main."
+  }
+}
+
+# Live shape: no ALB, Tunnel sidecar, tasks in private subnets with a public IP, boundaries and trust conditions kept.
+run "live_preserve_no_alb_tunnel_keeps_live_service_settings" {
+  command = plan
+
+  variables {
+    enable_alb             = false
+    certificate_arn        = null
+    alb_ingress_cidrs      = []
+    gateway_readiness_path = null
+    gateway_cloudflared = {
+      image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/cloudflared"
+      token_secret_arn   = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:test-tunnel-abcdef"
+    }
+    gateway_preserve = {
+      assign_public_ip                      = true
+      execution_permissions_boundary_arn    = "arn:aws:iam::111122223333:policy/dev-boundary-execution"
+      task_permissions_boundary_arn         = "arn:aws:iam::111122223333:policy/dev-boundary-task"
+      assume_role_source_conditions         = true
+      service_discovery_custom_health_check = true
+    }
+    core_preserve = {
+      assign_public_ip                      = true
+      execution_permissions_boundary_arn    = "arn:aws:iam::111122223333:policy/dev-boundary-execution"
+      task_permissions_boundary_arn         = "arn:aws:iam::111122223333:policy/dev-boundary-task"
+      assume_role_source_conditions         = true
+      service_discovery_custom_health_check = true
+    }
+  }
+
+  assert {
+    condition     = length(aws_lb.gateway) == 0 && output.gateway_target_group_arn == null && length(aws_vpc_security_group_ingress_rule.gateway_alb) == 0
+    error_message = "Live DEV has no ALB: no load balancer, target group or ALB rule may be planned."
+  }
+  assert {
+    condition     = module.gateway.service_name != null && module.core.service_name != null
+    error_message = "Gateway and Core services must still plan with the live preserve inputs."
+  }
+}
+
+run "preserve_rejects_non_policy_boundary" {
+  command = plan
+
+  variables {
+    core_preserve = { task_permissions_boundary_arn = "dev-boundary-task" }
+  }
+  expect_failures = [var.core_preserve]
+}
+
+# Alternative Tunnel path: the live 2-container Gateway shape (app + cloudflared) from raw definitions, no ALB.
+run "gateway_sidecar_alternative_path_keeps_two_containers" {
+  command = plan
+
+  variables {
+    enable_alb             = false
+    certificate_arn        = null
+    alb_ingress_cidrs      = []
+    gateway_readiness_path = null
+    gateway_cloudflared    = null
+    gateway_additional_containers = [{
+      name      = "cloudflared"
+      image     = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      essential = true
+      command   = ["tunnel", "--no-autoupdate", "run"]
+    }]
+    gateway_additional_ecr_repository_arns = ["arn:aws:ecr:ap-northeast-2:111122223333:repository/cloudflared"]
+  }
+
+  assert {
+    condition     = length(jsondecode(module.gateway.baseline_container_definitions)) == 2 && [for c in jsondecode(module.gateway.baseline_container_definitions) : c.name][1] == "cloudflared"
+    error_message = "The alternative Tunnel path must give the Gateway task its app container plus one cloudflared sidecar."
+  }
+  assert {
+    condition     = length(aws_lb.gateway) == 0
+    error_message = "The alternative Tunnel path is for ALB-free DEV only."
+  }
+}
+
+run "sidecar_paths_are_exclusive" {
+  command = plan
+
+  variables {
+    enable_alb = false
+    gateway_additional_containers = [{
+      name  = "cloudflared"
+      image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }]
+    gateway_cloudflared = {
+      image              = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ecr_repository_arn = "arn:aws:ecr:ap-northeast-2:111122223333:repository/cloudflared"
+      token_secret_arn   = "arn:aws:secretsmanager:ap-northeast-2:111122223333:secret:test-tunnel-abcdef"
+    }
+  }
+  expect_failures = [var.gateway_cloudflared]
+}
+
+run "sidecar_images_must_be_digest_pinned" {
+  command = plan
+
+  variables {
+    enable_alb = false
+    gateway_additional_containers = [{
+      name  = "cloudflared"
+      image = "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/cloudflared:latest"
+    }]
+  }
+  expect_failures = [var.gateway_additional_containers]
+}
