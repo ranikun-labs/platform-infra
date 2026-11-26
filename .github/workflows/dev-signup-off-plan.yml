@@ -1,0 +1,449 @@
+name: DEV signup-off plan (read-only)
+
+# Read-only plan of the DEV signup-off change for one reviewed candidate commit.
+#
+# Trust boundary (read this before editing):
+# - Candidate code is untrusted. Its .tf files are data only until `terraform init`/`plan`.
+# - Order per root: trusted checkout -> candidate checkout -> tool hash check ->
+#   pre-init trust scan (no credentials yet) -> OIDC role -> init/plan (candidate code runs
+#   here, with ACTIONS_ID_TOKEN_* blanked and GITHUB_STEP_SUMMARY/GITHUB_ENV/GITHUB_OUTPUT unset)
+#   -> gate and summary (trusted script from main, run with env -i).
+# - Adding a SHA to the allowlist hands DEV credentials to that code. The SHA review is the
+#   final control. Same-job files cannot fully protect trusted tooling from candidate code,
+#   so the hash check catches accidental or simple modification only.
+# - Plans only. Never applies. No artifacts are uploaded. Raw logs and plans are deleted.
+# - Published output is the sanitized gate summary: masked addresses, actions, changed
+#   attribute NAMES, and for failures only the denied action, service prefix and a hint.
+# - Requires the dev-signup-off-plan environment approval and DEV_SIGNUP_OFF_PRESERVE_JSON.
+# - Concurrency: group `dev-signup-off-plan` with cancel-in-progress: false. One run executes and
+#   at most one run waits. A newer run queued while another is waiting REPLACES (cancels) the
+#   waiting run, so a queued run can disappear without a result. Check the run that actually
+#   completed; re-dispatch if the one you wanted was replaced.
+# - MANDATORY PRECONDITION before the first SHA is added to the allowlist below. Candidate code
+#   runs with DEV-scoped plan credentials, so these controls are the real security boundary:
+#   1. Egress block-mode filter (step-security/harden-runner, egress-policy: block) as the FIRST
+#      step of every job that runs candidate code. Allowlist: the STS regional endpoint,
+#      registry.terraform.io, releases.hashicorp.com, the GitHub Actions endpoints, and the
+#      tfstate bucket's own host only: `<tfstate-bucket>.s3.ap-northeast-2.amazonaws.com`.
+#      Never the generic regional S3 host. Not yet added: harden-runner needs a full commit SHA
+#      that could not be verified here, and its allowlist needs a live run to validate.
+#      Enforced by test_dev_plan_workflow.py (EgressPreconditionTests).
+#   2. Plan role (ranikun-dev-signup-off-plan, environments/dev/signup-off-plan) IAM Resource scoped to the owning account
+#      (124495093425) with an aws:ResourceAccount condition. This condition stays mandatory,
+#      because regional API endpoints accept foreign ARNs. S3 endpoint policies do NOT apply
+#      on GitHub-hosted runners (public internet), so they are not a substitute for item 1.
+#      Alternative for stronger isolation: a self-hosted runner inside the VPC with an S3
+#      endpoint policy.
+#   Scanner note: dev_candidate_scan.py is a secondary mistake-catcher, not a security boundary.
+#   It approximates HCL with regular expressions and cannot be proven complete. Do not rely on
+#   it to contain a malicious candidate.
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full 40-character lowercase commit SHA to plan. Must be on the allowlist in the validate job.
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  validate:
+    if: github.repository == 'ranikun-labs/platform-infra' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Validate candidate SHA against allowlist
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'candidate_sha must be a full 40-character lowercase SHA' >&2; exit 1; }
+          # MANDATORY: do not add the first SHA until both items of the header's MANDATORY PRECONDITION
+          # are in place: a harden-runner egress-policy: block first step with the bucket-specific S3
+          # host only, and the plan role's aws:ResourceAccount-scoped IAM. Adding a SHA gives that
+          # code DEV credentials. test_dev_plan_workflow.py fails the PR if the first part is missing.
+          # Reviewed SHAs only; review of the SHA is a control, not the boundary.
+          # Empty means fail closed until an owner adds the reviewed full SHA here.
+          allowed=(
+          # Planned entry, not pinned yet (added only in the separate approved commit):
+          #   865138736fa38a18171cb566720a12e21ec587c6   candidate B, tree 128364d0
+          )
+          (( ${#allowed[@]} > 0 )) || { echo 'Candidate allowlist is empty; add the reviewed full SHA to this workflow first' >&2; exit 1; }
+          for sha in "${allowed[@]}"; do
+            [[ "$CANDIDATE_SHA" == "$sha" ]] && exit 0
+          done
+          echo 'candidate_sha is not on the allowlist' >&2
+          exit 1
+
+  plan-carelog-platform:
+    needs: validate
+    if: github.repository == 'ranikun-labs/platform-infra' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev-signup-off-plan
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 45
+    concurrency:
+      group: dev-signup-off-plan
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        root: [carelog, platform]
+    env:
+      AWS_REGION: ap-northeast-2
+      AWS_DEFAULT_REGION: ap-northeast-2
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: 'false'
+    steps:
+      - name: Check out trusted tooling from main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          persist-credentials: false
+          path: trusted
+
+      - name: Check out candidate commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+          path: candidate
+
+      - name: Record trusted tool hashes
+        run: |
+          set -euo pipefail
+          (cd "$GITHUB_WORKSPACE/trusted/.github/scripts" && sha256sum dev_plan_gate.py dev_candidate_scan.py) \
+            > "$RUNNER_TEMP/trusted-tools.sha256"
+
+      - name: Pre-init trust scan of candidate root (trusted script, no credentials yet)
+        env:
+          ROOT: ${{ matrix.root }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/summary"
+          (cd "$GITHUB_WORKSPACE/trusted/.github/scripts" && sha256sum -c --quiet "$RUNNER_TEMP/trusted-tools.sha256") \
+            || { echo 'trusted tool hash mismatch; refusing to run' >&2; exit 1; }
+          if ! env -i PATH=/usr/bin:/bin /usr/bin/python3 -I "$GITHUB_WORKSPACE/trusted/.github/scripts/dev_candidate_scan.py" \
+                --candidate-root "$GITHUB_WORKSPACE/candidate" --trusted-root "$GITHUB_WORKSPACE/trusted" \
+                --root "$ROOT" --summary "$RUNNER_TEMP/summary/${ROOT}-scan.md"; then
+            printf '%s\n' scan-failed > "$RUNNER_TEMP/skip-$ROOT.code"
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::124495093425:role/ranikun-dev-signup-off-plan
+          aws-region: ap-northeast-2
+          audience: sts.amazonaws.com
+          allowed-account-ids: '124495093425'
+          role-duration-seconds: 900
+
+      - name: Verify AWS identity
+        run: |
+          set -euo pipefail
+          identity=$(aws sts get-caller-identity --query '[Account,Arn]' --output text)
+          read -r account arn <<< "$identity"
+          [[ "$account" == 124495093425 && "$arn" == arn:aws:sts::124495093425:assumed-role/ranikun-dev-signup-off-plan/* ]]
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+
+      - name: Materialize protected preserve input for this root
+        env:
+          PRESERVE_JSON: ${{ secrets.DEV_SIGNUP_OFF_PRESERVE_JSON }}
+          ROOT: ${{ matrix.root }}
+        run: |
+          set -euo pipefail
+          umask 077
+          fail() { printf '%s\n' "$1" > "$RUNNER_TEMP/skip-$ROOT.code"; echo "$2" >&2; exit 1; }
+          root_dir="$GITHUB_WORKSPACE/candidate/environments/dev/$ROOT"
+          [[ -d "$root_dir" ]] || fail input-invalid "root directory missing for $ROOT"
+          [[ -n "$PRESERVE_JSON" ]] || fail missing-secret-key 'Missing DEV_SIGNUP_OFF_PRESERVE_JSON environment secret'
+          printf '%s' "$PRESERVE_JSON" | jq -e . >/dev/null 2>&1 \
+            || fail input-invalid 'DEV_SIGNUP_OFF_PRESERVE_JSON is not valid JSON'
+          printf '%s' "$PRESERVE_JSON" | jq -e --arg r "$ROOT" '.[$r] | type == "object" and length > 0' >/dev/null \
+            || fail missing-secret-key "no preserve object for $ROOT in the secret"
+          # Mask every scalar of this root's object before anything else is printed.
+          printf '%s' "$PRESERVE_JSON" | jq -j --arg r "$ROOT" '.[$r] | .. | scalars | select(. != null) | tostring + "\u0000"' \
+            | while IFS= read -r -d '' v; do
+                if [[ -n "$v" ]]; then printf '::add-mask::%s\n' "$v"; fi
+              done
+          out="$root_dir/dev-live-preserve.auto.tfvars.json"
+          printf '%s' "$PRESERVE_JSON" | jq -c --arg r "$ROOT" '.[$r]' > "$out"
+          chmod 600 "$out"
+          if grep -Eq 'sg-0{16}[0-9a-f]?|123456789012|REPLACE|0{40}' "$out"; then
+            fail input-invalid 'placeholder values found in preserve input; refusing to plan'
+          fi
+          count=$(find "$root_dir" -maxdepth 1 \( -name '*.tfvars' -o -name '*.tfvars.json' \) | wc -l)
+          [[ "$count" == 1 ]] || fail input-invalid 'unexpected tfvars files in root'
+
+      - name: Terraform init (candidate code runs; no OIDC token, no step-summary channel)
+        working-directory: candidate/environments/dev/${{ matrix.root }}
+        env:
+          ROOT: ${{ matrix.root }}
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
+          ACTIONS_ID_TOKEN_REQUEST_URL: ''
+        run: |
+          set -euo pipefail
+          umask 077
+          fail() { printf '%s\n' "$1" > "$RUNNER_TEMP/skip-$ROOT.code"; echo "$2" >&2; exit 1; }
+          expected_key="dev/${ROOT}/terraform.tfstate"
+          if ! env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT -u GITHUB_ENV terraform init -input=false -no-color -lockfile=readonly \
+            -backend-config='bucket=ranikun-dev-tfstate-124495093425' \
+            -backend-config='region=ap-northeast-2' \
+            -backend-config='allowed_account_ids=["124495093425"]' \
+            -backend-config="key=${expected_key}" >"$RUNNER_TEMP/${ROOT}-init.log" 2>&1; then
+            fail init-failed 'terraform init failed; raw log is not published'
+          fi
+
+      - name: Plan OFF (live preserve only, no overlay)
+        working-directory: candidate/environments/dev/${{ matrix.root }}
+        env:
+          ROOT: ${{ matrix.root }}
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
+          ACTIONS_ID_TOKEN_REQUEST_URL: ''
+        run: |
+          set -euo pipefail
+          umask 077
+          fail() { printf '%s\n' "$1" > "$RUNNER_TEMP/skip-$ROOT.code"; echo "$2" >&2; exit 1; }
+          plan="$RUNNER_TEMP/${ROOT}-off.tfplan"
+          json="$RUNNER_TEMP/${ROOT}-off.json"
+          log="$RUNNER_TEMP/${ROOT}-off.log"
+          if ! { env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT -u GITHUB_ENV terraform plan -input=false -no-color -lock-timeout=5m -out="$plan" >"$log" 2>&1 \
+                 && env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT -u GITHUB_ENV terraform show -json "$plan" > "$json"; }; then
+            fail plan-failed 'terraform plan failed; raw log is not published'
+          fi
+          rm -f -- "$plan"
+
+      - name: Sanitized OFF gate (trusted script from main, verified, env -i)
+        if: always()
+        env:
+          ROOT: ${{ matrix.root }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/summary"
+          (cd "$GITHUB_WORKSPACE/trusted/.github/scripts" && sha256sum -c --quiet "$RUNNER_TEMP/trusted-tools.sha256") \
+            || { echo 'trusted tool hash mismatch; refusing to run' >&2; exit 1; }
+          code=""
+          if [[ -f "$RUNNER_TEMP/skip-$ROOT.code" ]]; then code=$(cat "$RUNNER_TEMP/skip-$ROOT.code"); fi
+          env -i PATH=/usr/bin:/bin /usr/bin/python3 -I "$GITHUB_WORKSPACE/trusted/.github/scripts/dev_plan_gate.py" \
+            --root "$ROOT" --mode off \
+            --plan-json "$RUNNER_TEMP/${ROOT}-off.json" \
+            --log "$RUNNER_TEMP/${ROOT}-init.log" --log "$RUNNER_TEMP/${ROOT}-off.log" \
+            --skip-code "$code" \
+            --summary "$RUNNER_TEMP/summary/${ROOT}.md"
+
+      - name: Publish sanitized summary (written by trusted steps only)
+        if: always()
+        env:
+          ROOT: ${{ matrix.root }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -uo pipefail
+          { echo "## DEV signup-off OFF plan, candidate $CANDIDATE_SHA"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          for f in "$RUNNER_TEMP/summary/${ROOT}-scan.md" "$RUNNER_TEMP/summary/${ROOT}.md"; do
+            if [[ -f "$f" ]]; then cat "$f" >> "$GITHUB_STEP_SUMMARY"; fi
+          done
+          if [[ ! -f "$RUNNER_TEMP/summary/${ROOT}.md" ]]; then
+            echo "- Gate summary not produced for $ROOT." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Cleanup plans, .terraform, preserve input and skip codes
+        if: always()
+        env:
+          ROOT: ${{ matrix.root }}
+        run: |
+          set +e
+          root_dir="$GITHUB_WORKSPACE/candidate/environments/dev/${ROOT}"
+          rm -rf -- "$root_dir/.terraform"
+          find "$root_dir" -name '*.tfplan' -delete
+          rm -f -- "$root_dir/dev-live-preserve.auto.tfvars.json"
+          rm -f -- "$RUNNER_TEMP/${ROOT}-off.tfplan" "$RUNNER_TEMP/${ROOT}-off.json" \
+            "$RUNNER_TEMP/${ROOT}-off.log" "$RUNNER_TEMP/${ROOT}-init.log" "$RUNNER_TEMP/skip-${ROOT}.code"
+          exit 0
+
+  plan-finance:
+    # Report only: finance creation is expected, so it is reported, not gated.
+    # Runs after the carelog/platform legs, in the same concurrency group, so the order is fixed.
+    needs: [validate, plan-carelog-platform]
+    if: >-
+      always() && needs.validate.result == 'success' &&
+      github.repository == 'ranikun-labs/platform-infra' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev-signup-off-plan
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 45
+    concurrency:
+      group: dev-signup-off-plan
+      cancel-in-progress: false
+    env:
+      AWS_REGION: ap-northeast-2
+      AWS_DEFAULT_REGION: ap-northeast-2
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: 'false'
+    steps:
+      - name: Check out trusted tooling from main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          persist-credentials: false
+          path: trusted
+
+      - name: Check out candidate commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+          path: candidate
+
+      - name: Record trusted tool hashes
+        run: |
+          set -euo pipefail
+          (cd "$GITHUB_WORKSPACE/trusted/.github/scripts" && sha256sum dev_plan_gate.py dev_candidate_scan.py) \
+            > "$RUNNER_TEMP/trusted-tools.sha256"
+
+      - name: Pre-init trust scan of finance root (trusted script, no credentials yet)
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/summary"
+          (cd "$GITHUB_WORKSPACE/trusted/.github/scripts" && sha256sum -c --quiet "$RUNNER_TEMP/trusted-tools.sha256") \
+            || { echo 'trusted tool hash mismatch; refusing to run' >&2; exit 1; }
+          if ! env -i PATH=/usr/bin:/bin /usr/bin/python3 -I "$GITHUB_WORKSPACE/trusted/.github/scripts/dev_candidate_scan.py" \
+                --candidate-root "$GITHUB_WORKSPACE/candidate" --trusted-root "$GITHUB_WORKSPACE/trusted" \
+                --root finance --summary "$RUNNER_TEMP/summary/finance-scan.md"; then
+            printf '%s\n' scan-failed > "$RUNNER_TEMP/skip-finance.code"
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::124495093425:role/ranikun-dev-signup-off-plan
+          aws-region: ap-northeast-2
+          audience: sts.amazonaws.com
+          allowed-account-ids: '124495093425'
+          role-duration-seconds: 900
+
+      - name: Verify AWS identity
+        run: |
+          set -euo pipefail
+          identity=$(aws sts get-caller-identity --query '[Account,Arn]' --output text)
+          read -r account arn <<< "$identity"
+          [[ "$account" == 124495093425 && "$arn" == arn:aws:sts::124495093425:assumed-role/ranikun-dev-signup-off-plan/* ]]
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+
+      - name: Materialize protected preserve input for finance
+        env:
+          PRESERVE_JSON: ${{ secrets.DEV_SIGNUP_OFF_PRESERVE_JSON }}
+        run: |
+          set -euo pipefail
+          umask 077
+          fail() { printf '%s\n' "$1" > "$RUNNER_TEMP/skip-finance.code"; echo "$2" >&2; exit 1; }
+          root_dir="$GITHUB_WORKSPACE/candidate/environments/dev/finance"
+          [[ -n "$PRESERVE_JSON" ]] || fail missing-secret-key 'Missing DEV_SIGNUP_OFF_PRESERVE_JSON environment secret'
+          printf '%s' "$PRESERVE_JSON" | jq -e . >/dev/null 2>&1 \
+            || fail input-invalid 'DEV_SIGNUP_OFF_PRESERVE_JSON is not valid JSON'
+          printf '%s' "$PRESERVE_JSON" | jq -e '.finance | type == "object" and length > 0' >/dev/null \
+            || fail missing-secret-key 'no preserve object for finance in the secret'
+          printf '%s' "$PRESERVE_JSON" | jq -j '.finance | .. | scalars | select(. != null) | tostring + "\u0000"' \
+            | while IFS= read -r -d '' v; do
+                if [[ -n "$v" ]]; then printf '::add-mask::%s\n' "$v"; fi
+              done
+          out="$root_dir/dev-live-preserve.auto.tfvars.json"
+          printf '%s' "$PRESERVE_JSON" | jq -c '.finance' > "$out"
+          chmod 600 "$out"
+          if grep -Eq 'sg-0{16}[0-9a-f]?|123456789012|REPLACE|0{40}' "$out"; then
+            fail input-invalid 'placeholder values found in preserve input; refusing to plan'
+          fi
+          count=$(find "$root_dir" -maxdepth 1 \( -name '*.tfvars' -o -name '*.tfvars.json' \) | wc -l)
+          [[ "$count" == 1 ]] || fail input-invalid 'unexpected tfvars files in root'
+
+      - name: Terraform init (candidate code runs; no OIDC token, no step-summary channel)
+        working-directory: candidate/environments/dev/finance
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
+          ACTIONS_ID_TOKEN_REQUEST_URL: ''
+        run: |
+          set -euo pipefail
+          umask 077
+          fail() { printf '%s\n' "$1" > "$RUNNER_TEMP/skip-finance.code"; echo "$2" >&2; exit 1; }
+          expected_key='dev/finance/terraform.tfstate'
+          if ! env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT -u GITHUB_ENV terraform init -input=false -no-color -lockfile=readonly \
+            -backend-config='bucket=ranikun-dev-tfstate-124495093425' \
+            -backend-config='region=ap-northeast-2' \
+            -backend-config='allowed_account_ids=["124495093425"]' \
+            -backend-config="key=${expected_key}" >"$RUNNER_TEMP/finance-init.log" 2>&1; then
+            fail init-failed 'terraform init failed; raw log is not published'
+          fi
+
+      - name: Plan (creation expected; reported, not gated)
+        working-directory: candidate/environments/dev/finance
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
+          ACTIONS_ID_TOKEN_REQUEST_URL: ''
+        run: |
+          set -euo pipefail
+          umask 077
+          fail() { printf '%s\n' "$1" > "$RUNNER_TEMP/skip-finance.code"; echo "$2" >&2; exit 1; }
+          plan="$RUNNER_TEMP/finance.tfplan"
+          json="$RUNNER_TEMP/finance.json"
+          log="$RUNNER_TEMP/finance-plan.log"
+          if ! { env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT -u GITHUB_ENV terraform plan -input=false -no-color -lock-timeout=5m -out="$plan" >"$log" 2>&1 \
+                 && env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT -u GITHUB_ENV terraform show -json "$plan" > "$json"; }; then
+            fail plan-failed 'terraform plan failed; raw log is not published'
+          fi
+          rm -f -- "$plan"
+
+      - name: Sanitized finance report (trusted script from main, verified, env -i)
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/summary"
+          (cd "$GITHUB_WORKSPACE/trusted/.github/scripts" && sha256sum -c --quiet "$RUNNER_TEMP/trusted-tools.sha256") \
+            || { echo 'trusted tool hash mismatch; refusing to run' >&2; exit 1; }
+          code=""
+          if [[ -f "$RUNNER_TEMP/skip-finance.code" ]]; then code=$(cat "$RUNNER_TEMP/skip-finance.code"); fi
+          env -i PATH=/usr/bin:/bin /usr/bin/python3 -I "$GITHUB_WORKSPACE/trusted/.github/scripts/dev_plan_gate.py" \
+            --root finance --mode report \
+            --plan-json "$RUNNER_TEMP/finance.json" \
+            --log "$RUNNER_TEMP/finance-init.log" --log "$RUNNER_TEMP/finance-plan.log" \
+            --skip-code "$code" \
+            --summary "$RUNNER_TEMP/summary/finance.md"
+
+      - name: Publish sanitized finance summary (written by trusted steps only)
+        if: always()
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -uo pipefail
+          { echo "## DEV finance plan (report only), candidate $CANDIDATE_SHA"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          for f in "$RUNNER_TEMP/summary/finance-scan.md" "$RUNNER_TEMP/summary/finance.md"; do
+            if [[ -f "$f" ]]; then cat "$f" >> "$GITHUB_STEP_SUMMARY"; fi
+          done
+          if [[ ! -f "$RUNNER_TEMP/summary/finance.md" ]]; then
+            echo '- Finance report not produced.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Cleanup plans, .terraform, preserve input and skip codes
+        if: always()
+        run: |
+          set +e
+          root_dir="$GITHUB_WORKSPACE/candidate/environments/dev/finance"
+          rm -rf -- "$root_dir/.terraform"
+          find "$root_dir" -name '*.tfplan' -delete
+          rm -f -- "$root_dir/dev-live-preserve.auto.tfvars.json"
+          rm -f -- "$RUNNER_TEMP/finance.tfplan" "$RUNNER_TEMP/finance.json" \
+            "$RUNNER_TEMP/finance-plan.log" "$RUNNER_TEMP/finance-init.log" "$RUNNER_TEMP/skip-finance.code"
+          exit 0
