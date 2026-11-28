@@ -18,6 +18,10 @@ on:
       test_sha:
         required: true
         type: string
+      allow_unchanged_platform_service:
+        description: Allow an older platform-services dev commit only when the service paths remain unchanged.
+        default: false
+        type: boolean
       require_current_dev_tip:
         description: Reject stale automatic dev push deployments; leave false for manual reruns and rollbacks.
         default: false
@@ -106,6 +110,7 @@ jobs:
           FAMILY: ${{ vars.DEV_ECS_TASK_FAMILY }}
           IMAGE: ${{ needs.publish.outputs.image }}
           REQUIRE_CURRENT_DEV_TIP: ${{ inputs.require_current_dev_tip }}
+          ALLOW_UNCHANGED_PLATFORM_SERVICE: ${{ inputs.allow_unchanged_platform_service }}
           CALLER_EVENT: ${{ github.event_name }}
           CALLER_REF: ${{ github.ref }}
           TEST_SHA: ${{ inputs.test_sha }}
@@ -167,10 +172,46 @@ jobs:
             tip=$(jq -er '.object.sha | select(type == "string" and test("^[0-9a-f]{40}$"))' <<<"$tip_response") || {
               echo "Deploy blocked: invalid current dev tip response" >&2; exit 1;
             }
-            [[ "$tip" == "$TEST_SHA" ]] || {
-              echo "Deploy blocked: tested commit is no longer the current dev tip" >&2; exit 1;
+            [[ "$ALLOW_UNCHANGED_PLATFORM_SERVICE" == false ||
+               ( "$ALLOW_UNCHANGED_PLATFORM_SERVICE" == true && "$GITHUB_REPOSITORY" == ranikun-labs/platform-services && ( "$WORKLOAD" == core || "$WORKLOAD" == gateway ) ) ]] || {
+              echo "Deploy blocked: invalid platform service guard setting" >&2; exit 1;
             }
-          elif [[ "$REQUIRE_CURRENT_DEV_TIP" != false ]]; then
+            if [[ "$tip" != "$TEST_SHA" ]]; then
+              # Only platform-services has independent Core and Gateway push selection.
+              # Keep these paths in sync with its push selector.
+              [[ "$ALLOW_UNCHANGED_PLATFORM_SERVICE" == true && "$GITHUB_REPOSITORY" == ranikun-labs/platform-services ]] || {
+                echo "Deploy blocked: tested commit is no longer the current dev tip" >&2; exit 1;
+              }
+              case "$WORKLOAD" in
+                core) service_path=platform-core ;;
+                gateway) service_path=gateway-app ;;
+                *) echo "Deploy blocked: unsupported platform service" >&2; exit 1 ;;
+              esac
+              repo_dir=$(mktemp -d "$RUNNER_TEMP/dev-tip.XXXXXX")
+              git -C "$repo_dir" init -q
+              # Environment config keeps the credential out of command arguments and disk.
+              export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+              export GIT_CONFIG_VALUE_0
+              git -C "$repo_dir" fetch --no-tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "+refs/heads/dev:refs/remotes/origin/dev" || {
+                echo "Deploy blocked: could not fetch dev history" >&2; exit 1;
+              }
+              unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+              fetched_tip=$(git -C "$repo_dir" rev-parse refs/remotes/origin/dev)
+              [[ "$fetched_tip" == "$tip" ]] || {
+                echo "Deploy blocked: dev moved during verification" >&2; exit 1;
+              }
+              git -C "$repo_dir" merge-base --is-ancestor "$TEST_SHA" "$tip" || {
+                echo "Deploy blocked: tested commit is not an ancestor of dev" >&2; exit 1;
+              }
+              if git -C "$repo_dir" diff --quiet --no-renames "$TEST_SHA" "$tip" -- \
+                "$service_path" .github/workflows/dev-ecs-release.yml gradlew gradlew.bat gradle build.gradle.kts settings.gradle.kts; then
+                echo "No relevant $WORKLOAD changes since tested commit"
+              else
+                echo "Deploy blocked: service or shared paths changed since tested commit" >&2; exit 1
+              fi
+            fi
+          elif [[ "$REQUIRE_CURRENT_DEV_TIP" != false || "$ALLOW_UNCHANGED_PLATFORM_SERVICE" != false ]]; then
             echo "Deploy blocked: invalid tip guard setting" >&2; exit 1
           fi
           candidate=$(aws ecs register-task-definition --cli-input-json "file://$RUNNER_TEMP/task-definition.json" --query 'taskDefinition.taskDefinitionArn' --output text)
