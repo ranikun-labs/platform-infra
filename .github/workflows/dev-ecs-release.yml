@@ -90,6 +90,7 @@ jobs:
     timeout-minutes: 40
     concurrency:
       group: dev-ecs-${{ inputs.service }}
+      queue: max
       cancel-in-progress: false
     environment: dev-${{ inputs.service }}-deploy
     steps:
