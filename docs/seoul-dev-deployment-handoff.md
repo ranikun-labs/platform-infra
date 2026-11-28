@@ -1,6 +1,6 @@
 # 서울 DEV Carelog·Finance 배포 인계
 
-상태: 배포 준비 중. 이 문서는 관찰과 다음 확인 사항을 인계하며 plan, apply, 마이그레이션 또는 배포 승인이나 현재 AWS 상태의 독립적인 증거가 아니다. 아래 내용은 [서울 DEV MVP 인계](https://github.com/ranikun-labs/harness-foundation-docs/blob/6f80a366c3a71dbd8f85e5088f5dc7272937a511/docs/handoffs/2026-11-28-seoul-dev-mvp-handoff.md)의 보고를 기준으로 한다. 실행 직전에 대상 계정·리전과 실제 상태를 다시 확인한다.
+상태: 배포 준비 중. 이 문서는 관찰과 다음 확인 사항을 인계하며 plan, apply, 마이그레이션 또는 배포 승인이나 현재 AWS 상태의 독립적인 증거가 아니다. 아래 내용은 `harness-foundation-docs/docs/handoffs/2026-11-28-seoul-dev-mvp-handoff.md`의 보고를 기준으로 한다. 실행 직전에 대상 계정·리전과 실제 상태를 다시 확인한다.
 
 ## 후보와 배포 입력
 
