@@ -35,8 +35,8 @@ variable "tags" {
 variable "name_prefix" {
   type = string
   validation {
-    condition     = can(regex("^[A-Za-z0-9_-]+$", var.name_prefix)) && can(regex("(^|-)dev(-|$)", var.name_prefix))
-    error_message = "Use the existing platform prefix with a hyphen-delimited dev segment."
+    condition     = var.name_prefix == "ranikun-platform-dev"
+    error_message = "Use ranikun-platform-dev as the platform prefix."
   }
 }
 
@@ -46,5 +46,13 @@ variable "github_oidc_subjects" {
   validation {
     condition     = toset(keys(var.github_oidc_subjects)) == toset(["gateway", "core"])
     error_message = "Supply exact publish/deploy subjects for only: gateway, core."
+  }
+}
+
+variable "permissions_boundaries" {
+  type = map(object({ publish = string, deploy = string }))
+  validation {
+    condition     = toset(keys(var.permissions_boundaries)) == toset(["gateway", "core"])
+    error_message = "Supply reviewed per-workload publisher and deployer boundaries."
   }
 }
