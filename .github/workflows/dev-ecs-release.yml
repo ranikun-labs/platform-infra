@@ -198,13 +198,13 @@ jobs:
               }
               unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
               fetched_tip=$(git -C "$repo_dir" rev-parse refs/remotes/origin/dev)
-              [[ "$fetched_tip" == "$tip" ]] || {
-                echo "Deploy blocked: dev moved during verification" >&2; exit 1;
+              [[ "$fetched_tip" =~ ^[0-9a-f]{40}$ ]] || {
+                echo "Deploy blocked: invalid fetched dev tip" >&2; exit 1;
               }
-              git -C "$repo_dir" merge-base --is-ancestor "$TEST_SHA" "$tip" || {
+              git -C "$repo_dir" merge-base --is-ancestor "$TEST_SHA" "$fetched_tip" || {
                 echo "Deploy blocked: tested commit is not an ancestor of dev" >&2; exit 1;
               }
-              if git -C "$repo_dir" diff --quiet --no-renames "$TEST_SHA" "$tip" -- \
+              if git -C "$repo_dir" diff --quiet --no-renames "$TEST_SHA" "$fetched_tip" -- \
                 "$service_path" .github/workflows/dev-ecs-release.yml gradlew gradlew.bat gradle build.gradle.kts settings.gradle.kts; then
                 echo "No relevant $WORKLOAD changes since tested commit"
               else
