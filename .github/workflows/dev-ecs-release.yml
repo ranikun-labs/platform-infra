@@ -18,6 +18,10 @@ on:
       test_sha:
         required: true
         type: string
+      require_current_dev_tip:
+        description: Reject stale automatic dev push deployments; leave false for manual reruns and rollbacks.
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -101,6 +105,11 @@ jobs:
           CONTAINER: ${{ vars.DEV_ECS_CONTAINER }}
           FAMILY: ${{ vars.DEV_ECS_TASK_FAMILY }}
           IMAGE: ${{ needs.publish.outputs.image }}
+          REQUIRE_CURRENT_DEV_TIP: ${{ inputs.require_current_dev_tip }}
+          CALLER_EVENT: ${{ github.event_name }}
+          CALLER_REF: ${{ github.ref }}
+          TEST_SHA: ${{ inputs.test_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
           [[ "$ACCOUNT" =~ ^[0-9]{12}$ && -n "$CLUSTER" && -n "$SERVICE" && -n "$CONTAINER" && -n "$FAMILY" && -n "$REPOSITORY" ]]
@@ -144,6 +153,26 @@ jobs:
             with_entries(select(.value != null)) |
             .containerDefinitions |= map(if .name == $container then .image = $image else . end)
           ' <<<"$task" > "$RUNNER_TEMP/task-definition.json"
+          # Opt-in for automatic dev pushes only. This runs inside the deploy
+          # concurrency lock immediately before the first ECS mutation.
+          if [[ "$REQUIRE_CURRENT_DEV_TIP" == true ]]; then
+            [[ "$CALLER_EVENT" == push && "$CALLER_REF" == refs/heads/dev && "$TEST_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "Deploy blocked: tip guard requires a dev push and a full SHA" >&2; exit 1;
+            }
+            tip_response=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+              -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/git/ref/heads/dev") || {
+              echo "Deploy blocked: unable to read current dev tip" >&2; exit 1;
+            }
+            tip=$(jq -er '.object.sha | select(type == "string" and test("^[0-9a-f]{40}$"))' <<<"$tip_response") || {
+              echo "Deploy blocked: invalid current dev tip response" >&2; exit 1;
+            }
+            [[ "$tip" == "$TEST_SHA" ]] || {
+              echo "Deploy blocked: tested commit is no longer the current dev tip" >&2; exit 1;
+            }
+          elif [[ "$REQUIRE_CURRENT_DEV_TIP" != false ]]; then
+            echo "Deploy blocked: invalid tip guard setting" >&2; exit 1
+          fi
           candidate=$(aws ecs register-task-definition --cli-input-json "file://$RUNNER_TEMP/task-definition.json" --query 'taskDefinition.taskDefinitionArn' --output text)
           [[ "$candidate" == "arn:aws:ecs:${REGION}:${ACCOUNT}:task-definition/${FAMILY}:"* ]]
           # Recheck just before update to avoid overwriting a release that started meanwhile.
